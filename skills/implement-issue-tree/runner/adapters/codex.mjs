@@ -101,6 +101,8 @@
 //   req.profile で上書きできる（契約への任意の追加）。
 //
 // 時間切れ: プロセスグループへ SIGTERM、猶予後に SIGKILL（孫も止まる。setsid で抜けた孫は止められない）。
+// 出力超過: プロセスグループへ SIGKILL。どちらも close（パイプが閉じること）が来なければ猶予の後に決着し、パイプを閉じる
+// （抜けた孫がパイプを握っていても、段の時間上限まで並列の枠を握らない）。
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -599,6 +601,7 @@ export function createAdapter(cfg) {
       let overflow = null
       let timedOut = false
       let settled = false
+      let forceTimer = null
       const p = spawn(bin, args, { cwd, env: childEnv(merge, tmpDir), stdio: ['pipe', 'pipe', 'pipe'], detached: true })
       running.add(p)
       const termTimer = setTimeout(() => {
@@ -606,20 +609,32 @@ export function createAdapter(cfg) {
         killGroup(p.pid, 'SIGTERM')
         setTimeout(() => killGroup(p.pid, 'SIGKILL'), killGraceMs).unref()
         // 子が終了しなくても返す（close を待たない上限）
-        setTimeout(() => finish({ exitCode: null, signal: 'SIGKILL' }), killGraceMs + 1000).unref()
+        if (forceTimer === null) {
+          forceTimer = setTimeout(() => finish({ exitCode: null, signal: 'SIGKILL', forced: true }), killGraceMs + 1000)
+          forceTimer.unref()
+        }
       }, timeoutMs)
-      const finish = ({ exitCode, signal, spawnError }) => {
+      const finish = ({ exitCode, signal, spawnError, forced = false }) => {
         if (settled) return
         settled = true
         clearTimeout(termTimer)
+        clearTimeout(forceTimer)
         running.delete(p)
-        if (timedOut) killGroup(p.pid, 'SIGKILL')
+        if (timedOut || overflow !== null) killGroup(p.pid, 'SIGKILL')
+        // close が来ていない: 抜けた孫が握るパイプの読み口を閉じる（イベントループを握らせず、決着後に溜め込まない。agent-host の spawnScript と同じ）
+        if (forced) { p.stdout.destroy(); p.stderr.destroy() }
         done({ out: Buffer.concat(outChunks).toString('utf8'), err: Buffer.concat(errChunks).toString('utf8'), timedOut, overflow, exitCode, signal, spawnError })
       }
+      // 出力超過: グループを止め、猶予の後は close を待たずに決着する（新しいセッションへ抜けた孫がパイプを握っていても、
+      // 段の時間上限まで並列の枠を握らない。時間切れの経路・agent-host の spawnScript と同じ）
       const stop = (which) => {
         if (overflow !== null) return
         overflow = which
         killGroup(p.pid, 'SIGKILL')
+        if (forceTimer === null) {
+          forceTimer = setTimeout(() => finish({ exitCode: null, signal: 'SIGKILL', forced: true }), killGraceMs)
+          forceTimer.unref()
+        }
       }
       p.stdout.on('data', (d) => {
         if (overflow !== null) return

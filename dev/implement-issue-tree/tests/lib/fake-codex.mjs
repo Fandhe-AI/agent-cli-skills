@@ -14,6 +14,8 @@
 //     exitCode,              終了コード（既定 0。fail 指定時は 1）
 //     hang: true,            終了せず待つ（時間切れ試験）。SIGTERM を無視する
 //     grandchild: <pid file>,孫プロセス（sleep）を同じプロセスグループで起動し、pid を書く
+//     escapedHolder: <pid file>, 新しいセッションへ抜けた孫（sleep）を起動し、pid を書く。孫は標準出力・標準エラーを継ぐので、
+//                            プロセスグループを止めてもパイプが閉じない（close が来ない状況の再現）
 //     codeMode: [input, …],  セッションの記録へ code mode の呼び出し（custom_tool_call・name "exec"・input は JavaScript）を書く
 //     functionCalls: [{ name, arguments }, …], セッションの記録へ直接の function_call を書く
 //     noRollout: true,       セッションの記録を書かない（記録が見つからない状況）
@@ -106,6 +108,11 @@ if (!turn.noRollout && process.env.CODEX_HOME) {
 if (turn.grandchild) {
   const g = spawn('sleep', ['300'], { stdio: 'ignore' })
   writeFileSync(turn.grandchild, String(g.pid))
+}
+if (turn.escapedHolder) {
+  const g = spawn('sleep', ['30'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true })
+  writeFileSync(turn.escapedHolder, String(g.pid))
+  g.unref()
 }
 if (turn.hang) {
   process.on('SIGTERM', () => {})

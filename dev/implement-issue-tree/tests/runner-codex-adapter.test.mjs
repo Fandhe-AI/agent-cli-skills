@@ -913,6 +913,21 @@ test('出力の上限（P2）: stdout が上限を超えたらプロセスグル
   await assert.rejects(t.adapter.run(t.req({ timeoutMs: 12000 })), (e) => e instanceof AdapterError && e.kind === 'exit' && /上限/.test(e.message))
 })
 
+test('出力の上限: 新しいセッションへ抜けた孫がパイプを握っていても、猶予の後に close を待たずに失敗する（段の時間上限まで枠を握らない）', async () => {
+  const pidFile = join(tmpdir(), `iit-escaped-${process.pid}-${Math.random().toString(16).slice(2)}`)
+  trackTmp(pidFile)
+  const t = setup({ turns: [okTurn({ escapedHolder: pidFile, flood: { stream: 'stdout', bytes: 17 * 1024 * 1024 } })], toolConfig: { killGraceMs: 200 } })
+  const timeoutMs = 5000
+  const t0 = Date.now()
+  try {
+    await assert.rejects(t.adapter.run(t.req({ timeoutMs })), (e) => e instanceof AdapterError && e.kind === 'exit' && /上限/.test(e.message))
+    const elapsed = Date.now() - t0
+    assert.ok(elapsed < timeoutMs / 2, `時間上限（${timeoutMs} ms）を待たずに戻る（${elapsed} ms）`)
+  } finally {
+    try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL') } catch { /* 既に無い */ }
+  }
+})
+
 test('出力の上限（P2）: stderr が暴走しても（上限超で）止めて失敗する', async () => {
   const t = setup({ turns: [okTurn({ flood: { stream: 'stderr', bytes: 17 * 1024 * 1024 } })] })
   await assert.rejects(t.adapter.run(t.req({ timeoutMs: 12000 })), (e) => e instanceof AdapterError && e.kind === 'exit' && /上限/.test(e.message))
