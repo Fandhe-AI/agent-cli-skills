@@ -11,13 +11,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BASE_ARGS, importDefinitions } from './lib/stub-run.mjs'
 import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { gitEnv, makeRepo } from './lib/worktree-sandbox.mjs'
 import { SCRIPT_HASH_PLACEHOLDER_RE, bundleSha256 } from '../scripts/build-workflow.mjs'
 import { createAgentHost, spawnScript } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
+import { checkCleanupTarget } from '../../../skills/implement-issue-tree/runner/lib/cleanup-host.mjs'
 import { loadConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 
 const SKILL_DIR = fileURLToPath(new URL('../../../skills/implement-issue-tree', import.meta.url))
@@ -262,4 +263,52 @@ test('label のモデル切り替えの接尾辞（:fallback-<model>）は同じ
   assert.equal(h.calls.length, 0)
   assert.equal(got.worktree, 'removed', h.logs.join('\n'))
   assert.equal(s.state().items['2'].worktree, '')
+})
+
+// Issue #865: worktree.useRelativePaths=true（git 2.48 以降）で作った worktree は、<main>/.git/worktrees/<name>/gitdir に相対パス
+// （../../../.claude/worktrees/<name>/.git）を持ち、worktree の .git も相対の gitdir を持つ。git のバージョンに頼らず手で同じ形に書き換える
+// （古い git では設定が無視されて絶対パスのまま素通りするため）。絶対パスとの文字列比較では gitdir が見つからず、commondir・.git の照合を飛ばしていた
+function makeRelative(s) {
+  writeFileSync(join(s.gitdir, 'gitdir'), `${relative(s.gitdir, join(s.wt, '.git'))}\n`)
+  writeFileSync(join(s.wt, '.git'), `gitdir: ${relative(s.wt, s.gitdir)}\n`)
+  assert.match(readFileSync(join(s.gitdir, 'gitdir'), 'utf8'), /^\.\.\/\.\.\/\.\.\/\.claude\/worktrees\/[^/]+\/\.git\n$/, '前提: gitdir の中身が相対パス')
+}
+
+test('#865 相対パスの gitdir: 照合して直接実行し、worktree・gitdir を消して状態の worktree を空にする', async () => {
+  const s = setup()
+  makeRelative(s)
+  assert.deepEqual(checkCleanupTarget({ mainRoot: s.main, path: s.wt, parent: PARENT, issue: 2 }), { ok: true })
+  const { prompt, label } = await cleanupPromptOf(2, { status: 'merged', worktree: s.wt }, { cleanupWorktree: s.wt })
+  const h = makeHost(s.main, s.repo.root)
+  const got = await h.agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+  assert.equal(h.calls.length, 0)
+  assert.deepEqual(got, { ok: true, retained: false, branchSha: '', worktree: 'removed' }, h.logs.join('\n'))
+  assert.equal(existsSync(s.wt), false)
+  assert.equal(existsSync(s.gitdir), false)
+  assert.equal(s.state().items['2'].worktree, '')
+})
+
+test('#865 相対パスの gitdir: commondir を別の場所へ向けたもの・worktree の .git が別の gitdir を指すもの・同じ worktree を指す gitdir が 2 つあるものは拒否する', async () => {
+  // commondir の付け替え（相対の形）
+  const s = setup()
+  makeRelative(s)
+  mkdirSync(join(s.repo.root, 'fake.git'))
+  writeFileSync(join(s.gitdir, 'commondir'), `${relative(s.gitdir, join(s.repo.root, 'fake.git'))}\n`)
+  const { prompt, label } = await cleanupPromptOf(2, { status: 'merged', worktree: s.wt }, { cleanupWorktree: s.wt })
+  await assertRefused(s, prompt, label, '相対の gitdir と commondir の付け替え', /commondir がメインの \.git を指さない/)
+  assert.equal(existsSync(s.wt), true)
+  assert.equal(existsSync(s.gitdir), true)
+  // worktree の .git が別の gitdir を指す
+  const t = setup()
+  makeRelative(t)
+  const other = t.repo.addWorktree('other', { dir: join(t.main, '.claude', 'worktrees', 'other') })
+  writeFileSync(join(t.wt, '.git'), `gitdir: ${relative(t.wt, join(t.main, '.git', 'worktrees', 'other'))}\n`)
+  assert.equal(checkCleanupTarget({ mainRoot: t.main, path: t.wt, parent: PARENT, issue: 2 }).reason, 'worktree の .git が gitdir を指さない')
+  assert.equal(existsSync(other.path), true)
+  // 同じ worktree を指す gitdir が 2 つ（相対と絶対）
+  const u = setup()
+  makeRelative(u)
+  mkdirSync(join(u.main, '.git', 'worktrees', 'dup'))
+  writeFileSync(join(u.main, '.git', 'worktrees', 'dup', 'gitdir'), `${u.wt}/.git\n`)
+  assert.equal(checkCleanupTarget({ mainRoot: u.main, path: u.wt, parent: PARENT, issue: 2 }).reason, 'この worktree を指す gitdir が 2 つ以上ある')
 })
