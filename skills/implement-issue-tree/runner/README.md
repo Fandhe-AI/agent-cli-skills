@@ -157,7 +157,7 @@ _/iit-runner/<runId>/
   `events*.jsonl` 等にそのまま残る。秘密を出力したコマンドがあれば、それも残る。`_/` は gitignore 済みだが、ログを共有・
   転記する前に中身を確かめ、要らなくなったら消す。
 - メインの `.git`（または `.git/worktrees`）が symlink のリポジトリでは、隔離 worktree を作れない（作成時の gitdir の検査が Codex
-  アダプタと同じ基準で拒否し、作った worktree とブランチを片づけて例外にする。隔離の段は `null` になる）。
+  アダプタと同じ基準で拒否し、作った worktree とブランチを片づけて例外にする。隔離の段の呼び出しは例外になり、`meta.json` の `outcome` は `throw`）。
 - Codex exec の本体が終わった直後に、そのプロセスグループを SIGKILL する。`setsid` 等で新しいセッション・
   プロセスグループへ抜けた子孫は、このグループの停止では止まらない（ランナーは子孫を pid で追わない）。
 - `autoMerge` のランで `args.repo` を照合するマージ先は、メイン worktree での `gh repo view` の解決である。gh の remote の解決は
