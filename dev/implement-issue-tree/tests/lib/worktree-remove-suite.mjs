@@ -181,11 +181,12 @@ export function registerWorktreeRemoveTests(bash) {
       ['追加', (repo, w, other) => repo.git(w, 'update-index', '--add', '--cacheinfo', `160000,${other},sm2`)],
       ['削除', (repo, w) => repo.git(w, 'update-index', '--force-remove', 'sm')],
     ]
-    for (const [name, mutate] of cases) {
-      const repo = makeRepo({ submodule: true })
-      repo.write(repo.sub, 'f', 'two\n')
-      repo.git(repo.sub, 'commit', '-q', '-am', 's2')
-      const a = repo.addWorktree('a')
+    // リポジトリは 1 つを共有し、形ごとに別の worktree を使う（makeRepo の生成が重いので 1 回にする）
+    const repo = makeRepo({ submodule: true })
+    repo.write(repo.sub, 'f', 'two\n')
+    repo.git(repo.sub, 'commit', '-q', '-am', 's2')
+    for (const [i, [name, mutate]] of cases.entries()) {
+      const a = repo.addWorktree(`g${i}`)
       assert.ok(!existsSync(join(a.path, 'sm', '.git')), '前提: worktree の submodule は未初期化')
       mutate(repo, a.path, repo.head(repo.sub))
       assert.equal(repo.git(a.path, '-c', 'core.excludesFile=', 'status', '--porcelain=v2', '-uall', '--ignore-submodules=all'), '', `${name}: 前提: --ignore-submodules=all の status には出ない`)

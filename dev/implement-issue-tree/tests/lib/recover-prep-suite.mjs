@@ -353,13 +353,15 @@ export function registerRecoverPrepTests(bash) {
   // 付け替え・削除は WIP コミットに入る。ディレクトリの無い gitlink の追加は add -A が index から落として commit が「nothing to commit」で失敗するので、
   // commit-failed・wipCommitted:false（退避完了とは言わない。worktree は削除側が汚れとして保持する）
   smTest(`${tag} submodule 未初期化で gitlink だけを付け替え・削除・追加: 汚れに数え、付け替え・削除は WIP コミットに含めて退避完了、追加は退避完了と言わない`, () => {
+    // リポジトリは 1 つを共有し、形ごとに別の worktree（別のブランチ）を使う（makeRecoverRepo の生成が重いので 1 回にする）
+    const repo = makeRecoverRepo({ submodule: true })
+    repo.git(repo.main, 'push', '-q', 'origin', 'main')
+    repo.write(repo.sub, 'f', 'two\n')
+    repo.git(repo.sub, 'commit', '-q', '-am', 's2')
+    const other = repo.head(repo.sub)
+    let seq = 0
     const setup = (mutate) => {
-      const repo = makeRecoverRepo({ submodule: true })
-      repo.git(repo.main, 'push', '-q', 'origin', 'main')
-      repo.write(repo.sub, 'f', 'two\n')
-      repo.git(repo.sub, 'commit', '-q', '-am', 's2')
-      const other = repo.head(repo.sub)
-      const a = repo.addWorktree('a')
+      const a = repo.addWorktree(`g${seq++}`)
       const before = repo.head(a.path)
       mutate(repo, a.path, other)
       const r = prep(repo, a)
