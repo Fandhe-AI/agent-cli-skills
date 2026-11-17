@@ -348,6 +348,33 @@ export function registerRecoverPrepTests(bash) {
     assert.deepEqual([r.result.wip, r.result.wipCommitted, r.result.dirty], ['submodule', false, 0])
   })
 
+  // Issue #867: 未初期化 submodule の gitlink だけの変更（index の付け替え・削除）は --ignore-submodules=all の status に出ない。汚れに数えないと
+  // wip:none・wipCommitted:true（退避済み）と報告して、変更を index に残したままにしていた。index と HEAD の木の比較（中へは降りない）で数えて WIP コミットに含める
+  smTest(`${tag} submodule 未初期化で gitlink だけを付け替え・削除: 汚れに数えて WIP コミットに含め、退避完了（wipCommitted:true）`, () => {
+    const cases = [
+      ['付け替え', (repo, w, other) => repo.git(w, 'update-index', '--cacheinfo', `160000,${other},sm`), (repo, a, other) => assert.equal(repo.git(repo.main, 'rev-parse', `${a.branch}:sm`), other, '付け替えた gitlink がコミットに入る')],
+      ['削除', (repo, w) => repo.git(w, 'update-index', '--force-remove', 'sm'), (repo, a) => assert.equal(repo.git(repo.main, 'ls-tree', a.branch, 'sm'), '', 'gitlink の削除がコミットに入る')],
+    ]
+    for (const [name, mutate, verify] of cases) {
+      const repo = makeRecoverRepo({ submodule: true })
+      repo.git(repo.main, 'push', '-q', 'origin', 'main')
+      repo.write(repo.sub, 'f', 'two\n')
+      repo.git(repo.sub, 'commit', '-q', '-am', 's2')
+      const other = repo.head(repo.sub)
+      const a = repo.addWorktree('a')
+      const before = repo.head(a.path)
+      mutate(repo, a.path, other)
+      const r = prep(repo, a)
+      assert.equal(r.status, 0, r.stderr)
+      assert.deepEqual([r.result.wip, r.result.wipCommitted], ['committed', true], `${name}: ${JSON.stringify(r.result)}`)
+      assert.ok(r.result.dirty >= 1, `${name}: ${JSON.stringify(r.result)}`)
+      assert.equal(logSubjects(repo, a.branch)[0], WIP_SUBJECT, name)
+      assert.notEqual(repo.head(a.path), before, name)
+      verify(repo, a, other)
+      assert.equal(repo.git(a.path, 'diff-index', '--cached', '--raw', 'HEAD'), '', `${name}: index に変更が残らない`)
+    }
+  })
+
   // 初期化済み submodule があれば WIP コミットも作らない（add・commit が submodule の中を観測し、中の config のコマンドを実行し得る）。worktree は削除側が保持する
   smTest(`${tag} submodule 内の未コミット変更: submodule・wipCommitted:false。初期化済み submodule があるので親の変更も WIP に積まず、そのまま残す`, () => {
     const repo = makeRecoverRepo({ submodule: true })

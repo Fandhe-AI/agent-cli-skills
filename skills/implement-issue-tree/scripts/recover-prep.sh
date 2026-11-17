@@ -15,7 +15,8 @@
 #      例外（Issue #731）: live で detached のとき、状態のブランチ先端が HEAD の祖先・どの worktree も使用中でない・途中状態でない、をすべて満たせば
 #      `git update-ref`（旧値つき）でブランチを HEAD まで進め、update-ref の 1 トランザクション（HEAD の旧値つき symref-update + ブランチ先端の verify）で worktree をそのブランチへ付け直してから通常の live として進める
 #   2. live のとき、未コミット変更があれば WIP コミットを作る。汚れの観測は worktree-remove.sh と同じ対象の
-#      `git -c core.excludesFile= status --porcelain=v2 -z -uall --ignore-submodules=all`（利用者の status.showUntrackedFiles や
+#      `git -c core.excludesFile= status --porcelain=v2 -z -uall --ignore-submodules=all` に、それが隠す未初期化 submodule の gitlink だけの変更
+#      （index と HEAD の木の gitlink の差。Issue #867）を足したもの（利用者の status.showUntrackedFiles や
 #      グローバルの除外に左右されない。-z はパスの C 引用〔非 ASCII・"・\・タブ〕で入れ子の git リポジトリの検出が取りこぼすのを避けるため。
 #      worktree-remove.sh は行数だけを数え、引用で数は変わらないので -z なしのまま）。フックは通す（--no-verify を使わない）。退避完了（wipCommitted:true）の根拠はコミットの終了コードではなく、
 #      コミット後の同じ観測で汚れが無いこと。フックの拒否・フックによる書き換え・submodule 内の未コミットの変更・入れ子の git リポジトリ・
@@ -163,6 +164,24 @@ sub_populated() {
   echo "${n}"
 }
 
+# index と HEAD の木の間の gitlink の差の件数（$1 = worktree のパス。読めなければ -1）。observe の status は --ignore-submodules=all なので、
+# 未初期化 submodule の gitlink だけの変更（index での付け替え・削除・追加）が見えない（Issue #867。見えないと wip:none・wipCommitted:true と
+# 誤って報告し、変更を index に残す）。--cached は index と木だけを読み、submodule の中へは降りない。コミットが無ければ空の木と比べる。
+# 汚れの行数（wr_count_status の WR_DIRTY）に足して使う。gitlink 以外の行は status が数えるので数えない（worktree-remove.sh と同じ）
+gitlink_changes() {
+  local head raw
+  head=$(git --no-optional-locks -c core.fsmonitor=false -C "$1" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=""
+  [ -n "${head}" ] || head=$(git --no-optional-locks -c core.fsmonitor=false -C "$1" hash-object -t tree /dev/null 2>/dev/null) || head=""
+  [ -n "${head}" ] || { echo -1; return 0; }
+  raw=$(git --no-optional-locks -c core.fsmonitor=false -C "$1" diff-index --cached --raw --no-renames --no-ext-diff --ignore-submodules=none "${head}" 2>/dev/null) || { echo -1; return 0; }
+  wr_count_gitlink_raw "${raw}"
+}
+
+# 汚れの行数（$1）に gitlink の差（$2。-1 = 読めなかった）を足す。どちらかが -1 なら -1
+add_dirty() {
+  if [ "$1" -lt 0 ] || [ "$2" -lt 0 ]; then echo -1; else echo $(($1 + $2)); fi
+}
+
 # マージ・cherry-pick・revert・rebase の途中か（未解決の途中状態。add -A は確定させてしまうので触らない）。ref とディレクトリの両方で見る
 in_progress() { # $1 = worktree のパス
   local ref d gp
@@ -279,7 +298,7 @@ free_holders() {
       hdirty=-1
     else
       wr_count_status "${OBS_OUT}"
-      hdirty=${WR_DIRTY}
+      hdirty=$(add_dirty "${WR_DIRTY}" "$(gitlink_changes "${hp}")")
       # 実体のある submodule は中を観測しないので clean と言えない（汚れとして数え、解放しない）
       hsub=$(sub_populated "${hp}" "${HOLDER_GITDIR}")
       if [ "${hsub}" != 0 ]; then hdirty=-1; fi
@@ -452,7 +471,7 @@ if [ "${wtstate}" = live ]; then
     rp_scan_status ""
   else
     wr_count_status "${OBS_OUT}"
-    R_DIRTY=${WR_DIRTY}
+    R_DIRTY=$(add_dirty "${WR_DIRTY}" "$(gitlink_changes "${path}")")
     rp_scan_status "${OBS_OUT}"
   fi
   ipg=0
@@ -497,8 +516,8 @@ if [ "${wtstate}" = live ]; then
         after_sub=0
       else
         wr_count_status "${OBS_OUT}"
-        after_dirty=${WR_DIRTY}
         after_sub=${WR_SUB_DIRTY}
+        after_dirty=$(add_dirty "${WR_DIRTY}" "$(gitlink_changes "${path}")")
       fi
       R_WIP=$(rp_wip_after "${crc}" "${after_dirty}" "${after_sub}" "${cstate}")
       ;;
