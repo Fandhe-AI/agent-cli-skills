@@ -4,7 +4,8 @@
 // strict が課す制約: すべての object が additionalProperties:false で、properties の全キーが required。
 // そのため次の規則で変換し、応答は元の schema を見ながら戻す（実測は _/local-plans/iit-runners-phase0.md の 0-1）。
 //   1. properties を持つ object: additionalProperties:false・required は全キー。元が任意のキーは null 許容にする
-//      （type に 'null' を足す・enum に null を足す・type が無ければ anyOf で包む）。
+//      （type に 'null' を足す・enum に null を足す・type が無ければ anyOf で包む）。説明の末尾に「省くときは null」を足す
+//      （OMIT_HINT。元から null を許すキーには足さない。null が値の意味を持つため）。
 //   2. properties を持たない object（自由形式。additionalProperties が true・省略・schema）: [{key, value}] の配列へ置き換える。
 //      value は additionalProperties が schema ならその型、そうでなければ JSON を文字列化したもの。
 //   3. oneOf は anyOf へ置き換える（strict は oneOf を受理しない）。
@@ -20,11 +21,20 @@ const isObjectSchema = (s) => isObj(s) && (typesOf(s).includes('object') || (s.t
 const isFreeObject = (s) => isObjectSchema(s) && (!isObj(s.properties) || Object.keys(s.properties).length === 0) && s.additionalProperties !== false
 export const allowsNull = (s) => isObj(s) && (typesOf(s).includes('null') || (Array.isArray(s.enum) && s.enum.includes(null)))
 
+// 任意のキーの説明に足す文面。strict では全キーが required になり、モデルは欄を省けない。省き方を示さないと、
+// 「封筒に出たときだけ」の欄に空文字等を書き、戻した応答に元に無い欄が残る（封筒の sha256 の再計算・欄の有無の検査で拒否される）。
+// 「無ければ空文字」のように空文字を値として指示する説明とも矛盾しないよう、空文字の禁止ではなく「省く = null」とだけ書く
+export const OMIT_HINT = 'この欄を省くときは null を書く'
+const withOmitHint = (description) => (typeof description === 'string' && description !== '' ? `${description}（${OMIT_HINT}）` : OMIT_HINT)
+
 function nullable(w) {
   if (allowsNull(w)) return w
   const withEnum = Array.isArray(w.enum) ? { enum: [...w.enum, null] } : {}
-  if (w.type === undefined) return { anyOf: [w, { type: 'null' }] }
-  return { ...w, type: [...typesOf(w), 'null'], ...withEnum }
+  if (w.type === undefined) {
+    const { description, ...rest } = w
+    return { anyOf: [rest, { type: 'null' }], description: withOmitHint(description) }
+  }
+  return { ...w, type: [...typesOf(w), 'null'], ...withEnum, description: withOmitHint(w.description) }
 }
 
 /** 元の schema から strict 用の schema を作る（入力は変更しない）。 */
