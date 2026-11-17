@@ -431,6 +431,11 @@ test('models: validateConfig は表の欠落・未知のモデル名・不正な
     (c) => { c.models.codex.opus.model = '' },
     (c) => { c.limits.maxParallel = 0 },
     (c) => { c.timeoutsSec.byPhase.Plan = -1 },
+    (c) => { c.timeoutsSec.worktree = [] },
+    (c) => { c.timeoutsSec.worktree = { fetch: 0, git: 120 } },
+    (c) => { c.timeoutsSec.worktree = { fetch: 300, git: 1.5 } },
+    (c) => { c.timeoutsSec.worktree = { fetch: '300' } },
+    (c) => { c.timeoutsSec.worktree = { fetch: 300, git: 120, add: 10 } },
     (c) => { c.cleanup.deleteSessions = 'yes' },
     (c) => { delete c.models.codex },
     (c) => { c.toolConfig = [] },
@@ -456,6 +461,11 @@ test('models: validateConfig は表の欠落・未知のモデル名・不正な
   okPaths.toolConfig.codex.extraWritePaths = ['/tmp/origin', '/var/x']
   assert.doesNotThrow(() => validateConfig(okPaths))
   assert.doesNotThrow(() => validateConfig((({ toolConfig: _, ...c }) => c)(base())), 'toolConfig は省ける')
+  // 隔離 worktree の git の上限（#861）。既定の設定に置き、省いてもよい（worktree.mjs の既定 300 秒・120 秒）
+  assert.deepEqual(base().timeoutsSec.worktree, { fetch: 300, git: 120 })
+  const noWt = base()
+  delete noWt.timeoutsSec.worktree
+  assert.doesNotThrow(() => validateConfig(noWt), 'timeoutsSec.worktree は省ける')
 })
 
 test('models: 時間切れは phase ごとの表、無ければ default（ミリ秒）', () => {

@@ -139,13 +139,14 @@ test('main: アダプタが無い・読み込みで例外・生成物を読め�
   assert.equal(a.instances.length, 0, 'アダプタを作っていない')
 })
 
-test('main: --tool opencode は未対応で、アダプタが無い経路の終了コード 3（Issue #853 を案内し、_/iit-runner を作らない）', async () => {
+test('main: --tool opencode は未対応で、アダプタが無い経路の終了コード 3（未対応と案内し、_/iit-runner を作らない）', async () => {
   const mainRoot = newMain()
   const x = deps({ mainRoot, mod: null })
   x.d.loadAdapter = (tool) => importAdapter(tool)
   assert.equal(await main(['--tool', 'opencode', '--args', argsFile({ parent: 1 }), '--no-build-check'], x.d), 3, x.err.join(''))
-  assert.match(x.err.join(''), /前提の不足: アダプタ adapters\/opencode\.mjs が無い/)
-  assert.match(x.err.join(''), /#853/)
+  assert.match(x.err.join(''), /前提の不足: アダプタ adapters\/opencode\.mjs が無い（OpenCode は未対応）/)
+  // 配布物の文面にこのリポジトリのイシュー番号を書かない（導入先では別のイシューを指す）
+  assert.doesNotMatch(x.err.join(''), /#\d/)
   assert.equal(existsSync(join(mainRoot, '_')), false)
   assert.deepEqual(x.out, [])
 })
@@ -454,6 +455,69 @@ test('main（LOW-11）: start 後の想定外の例外（結果の書き出し�
   x.d.stdout = async () => { throw new Error('EPIPE') }
   await assert.rejects(main(['--tool', 'codex', '--args', argsFile({ parent: 1 }), '--no-build-check'], x.d), /EPIPE/)
   assert.equal(a.instances[0].closed, 1)
+})
+
+// 別のリポジトリを指す git の位置の環境変数（継いだまま子へ渡すと git の対象が cwd でなくなる。#860）
+const FOREIGN_GIT_ENV = { GIT_DIR: '/other/.git', GIT_WORK_TREE: '/other', GIT_INDEX_FILE: '/other/.git/index', GIT_COMMON_DIR: '/other/.git', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.worktree', GIT_CONFIG_VALUE_0: '/other' }
+
+test('main（#860）: gh repo view とアダプタへ渡す env から GIT_DIR 等を外す（GIT_ 以外と GH_REPO の照合は変えない）', async () => {
+  const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  const x = deps({ mod: a, workflow: tinyWorkflow(async () => ({})) })
+  x.d.env = { HOME: '/nonexistent', ...FOREIGN_GIT_ENV }
+  assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1, autoMerge: true }), '--no-build-check'], x.d), 0, x.err.join(''))
+  assert.deepEqual(x.calls.repoOf[0].env, { HOME: '/nonexistent' })
+  assert.deepEqual(a.instances[0].cfg.env, { HOME: '/nonexistent' })
+})
+
+test('resolveRepo（#860）: 継いだ GIT_DIR 等と GH_REPO を外して gh repo view を起動する', () => {
+  const bin = join(root, `bin-repo-${++seq}`)
+  mkdirSync(bin)
+  const rec = join(bin, 'env.txt')
+  writeFileSync(join(bin, 'gh'), `#!/bin/sh\nenv > ${JSON.stringify(rec)}\necho acme/widget\n`)
+  chmodSync(join(bin, 'gh'), 0o755)
+  const r = resolveRepo(newMain(), { PATH: `${bin}:${process.env.PATH}`, GH_REPO: 'evil/other', ...FOREIGN_GIT_ENV })
+  assert.deepEqual(r, { ok: true, repo: 'acme/widget' })
+  const seen = readFileSync(rec, 'utf8')
+  for (const k of ['GH_REPO', ...Object.keys(FOREIGN_GIT_ENV)]) assert.doesNotMatch(seen, new RegExp(`^${k}=`, 'm'), k)
+})
+
+test('CLI（#860）: 起動口で process.env から GIT_DIR 等を外す（gh・実行仕様の段の子も継がない）', () => {
+  const bin = join(root, `bin-cli-${++seq}`)
+  mkdirSync(bin)
+  const rec = join(bin, 'env.txt')
+  // 認証確認で呼ばれる gh が受け取った env を記録して、認証失敗（3）で止める
+  writeFileSync(join(bin, 'gh'), `#!/bin/sh\nenv > ${JSON.stringify(rec)}\necho "not logged in" >&2\nexit 1\n`)
+  chmodSync(join(bin, 'gh'), 0o755)
+  const cwd = newMain()
+  const r = spawnSync(process.execPath, [RUN_MJS, '--tool', 'codex', '--args', argsFile({ parent: 1 })], {
+    cwd, encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GH_HOST: 'gh.invalid', ...FOREIGN_GIT_ENV },
+  })
+  assert.equal(r.status, 3, r.stderr)
+  const seen = readFileSync(rec, 'utf8')
+  for (const k of Object.keys(FOREIGN_GIT_ENV)) assert.doesNotMatch(seen, new RegExp(`^${k}=`, 'm'), k)
+  assert.match(seen, /^GH_HOST=gh\.invalid$/m, 'git 以外は継ぐ')
+})
+
+test('main（#861）: 隔離 worktree の作成に設定の timeoutsSec.worktree（秒）をミリ秒で渡す。省けば作成関数の既定', async () => {
+  const base = JSON.parse(readFileSync(fileURLToPath(new URL('../../../skills/implement-issue-tree/runner/config/default.json', import.meta.url)), 'utf8'))
+  const flow = () => tinyWorkflow(async (args, agent) => ({ r: await agent('i', { label: 'impl:#2', schema: SCHEMA, isolation: 'worktree' }) }))
+  const run = async (config) => {
+    const made = []
+    const a = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+    const x = deps({ mod: a, workflow: flow() })
+    x.d.createWorktree = async (p) => { made.push(p); return { path: `${p.mainRoot}/.claude/worktrees/${p.runId}-${p.n}` } }
+    assert.equal(await main(['--tool', 'codex', '--args', argsFile({ parent: 1 }), '--config', argsFile(config), '--no-build-check'], x.d), 0, x.err.join(''))
+    assert.equal(made.length, 1)
+    assert.equal(a.calls[0].cwd, `${x.mainRoot}/.claude/worktrees/${RUN_ID}-1`)
+    return made[0]
+  }
+  const custom = await run({ ...base, timeoutsSec: { ...base.timeoutsSec, worktree: { fetch: 7, git: 3 } } })
+  assert.equal(custom.fetchTimeoutMs, 7000)
+  assert.equal(custom.gitTimeoutMs, 3000)
+  const { worktree: _w, ...noWt } = base.timeoutsSec
+  const dflt = await run({ ...base, timeoutsSec: noWt })
+  assert.equal('fetchTimeoutMs' in dflt, false)
+  assert.equal('gitTimeoutMs' in dflt, false)
 })
 
 test('registerSignals（LOW-11）: SIGINT・SIGTERM・SIGHUP を 1 回ずつ登録し、シグナル名をハンドラへ渡す', () => {

@@ -35,6 +35,11 @@ export function validateConfig(config) {
   const t = config.timeoutsSec
   if (!isPlainObject(t) || !isPosInt(t.default) || !isPlainObject(t.byPhase)) fail('timeoutsSec')
   for (const [phase, sec] of Object.entries(t.byPhase)) if (!isPosInt(sec)) fail(`timeoutsSec.byPhase.${phase}`)
+  // 隔離 worktree の git の上限（秒。fetch とそれ以外。lib/worktree.mjs の createWorktree）。省けば作成関数の既定
+  if (t.worktree !== undefined) {
+    if (!isPlainObject(t.worktree)) fail('timeoutsSec.worktree')
+    for (const [k, sec] of Object.entries(t.worktree)) if (!['fetch', 'git'].includes(k) || !isPosInt(sec)) fail(`timeoutsSec.worktree.${k}`)
+  }
   if (!isPlainObject(config.cleanup) || typeof config.cleanup.deleteSessions !== 'boolean') fail('cleanup.deleteSessions')
   if (!isPlainObject(config.models)) fail('models')
   for (const tool of TOOLS) {

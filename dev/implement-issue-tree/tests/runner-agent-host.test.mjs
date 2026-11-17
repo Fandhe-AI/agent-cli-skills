@@ -202,6 +202,18 @@ test('isolation: worktree は通し番号で作った worktree を cwd にし、
   assert.equal(failing.calls.length, 0)
 })
 
+test('isolation: worktree の作成関数は非同期（worktree.mjs の createWorktree は Promise を返す）。待ってから cwd にし、拒否は例外（#861）', async () => {
+  const { agent, calls } = makeHost({
+    reply: () => ({ ok: true, n: 1 }),
+    cfg: { createWorktree: async (p) => { await new Promise((r) => setTimeout(r, 5)); return { path: `${p.mainRoot}/.claude/worktrees/${p.runId}-${p.n}` } } },
+  })
+  await agent('b', { label: 'impl:#2', schema: SCHEMA, isolation: 'worktree' })
+  assert.equal(calls[0].cwd, `${mainRoot}/.claude/worktrees/${RUN_ID}-1`)
+  const failing = makeHost({ reply: () => ({ ok: true, n: 1 }), cfg: { createWorktree: async () => { throw new Error('git fetch が 300 ms で時間切れになった') } } })
+  await assert.rejects(failing.agent('b', { label: 'impl:#2', schema: SCHEMA, isolation: 'worktree' }), /時間切れ/)
+  assert.equal(failing.calls.length, 0)
+})
+
 test('worktreeGitdir（HIGH-2）: 作成関数が返した gitdir を検証した realpath だけを渡し、修復ターンでも同じ値。隔離しない段・gitdir を返さない作成関数は null。メインの .git/worktrees/ 直下でなければ例外', async () => {
   const wtRoot = join(mainRoot, '.git', 'worktrees')
   const gd = join(wtRoot, `${RUN_ID}-x`)

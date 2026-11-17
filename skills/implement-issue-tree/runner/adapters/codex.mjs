@@ -110,6 +110,7 @@ import { mergeExecCommandFor } from '../lib/guard.mjs'
 import { isNormalizedAbsPathList } from '../lib/path-list.mjs'
 import { isMergeTarget } from '../lib/merge-target.mjs'
 import { GUARD_SCRIPT_MISSING, findGuardScript } from '../lib/guard-script.mjs'
+import { gitLocationFreeEnv } from '../lib/worktree.mjs'
 import { decodeStrictText, strictifySchema } from './codex-strict.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -473,7 +474,9 @@ export function createAdapter(cfg) {
     return v.map(agentTmpDir)
   }
   const platform = cfg.platform ?? process.platform
-  const baseEnv = { ...(cfg.env ?? process.env) }
+  // 継いだ GIT_DIR 等（リポジトリの位置を変える git の変数）を外す。残すと Codex のエージェントが worktree の中で
+  // 打つ git が cwd ではなくその変数の指すリポジトリへ向く（lib/worktree.mjs の gitLocationFreeEnv）
+  const baseEnv = gitLocationFreeEnv(cfg.env ?? process.env)
   const home = baseEnv.HOME ?? homedir()
   let codexHome = null
   const killGraceMs = tc.killGraceMs ?? 2000
@@ -489,17 +492,18 @@ export function createAdapter(cfg) {
     const env = { ...baseEnv, CODEX_HOME: codexHome, TMPDIR: tmpDir, TMPPREFIX: join(tmpDir, 'zsh') }
     // merge 段は対象リポジトリを固定する（gh pr merge <N> を別リポジトリへ向けさせない。MEDIUM-8）
     if (merge !== null) env.GH_REPO = merge.repo
-    // 追跡ブランチの自動設定を止める（0-2）。既存の GIT_CONFIG_* があれば続きの番号へ足す。
-    const n = Number.parseInt(env.GIT_CONFIG_COUNT ?? '0', 10) || 0
-    env[`GIT_CONFIG_KEY_${n}`] = 'branch.autoSetupMerge'
-    env[`GIT_CONFIG_VALUE_${n}`] = 'false'
-    env.GIT_CONFIG_COUNT = String(n + 1)
+    // 追跡ブランチの自動設定を止める（0-2）。継いだ GIT_CONFIG_COUNT・KEY・VALUE は baseEnv で外してあるので 0 番に置く
+    env.GIT_CONFIG_KEY_0 = 'branch.autoSetupMerge'
+    env.GIT_CONFIG_VALUE_0 = 'false'
+    env.GIT_CONFIG_COUNT = '1'
     return env
   }
 
   async function start() {
     if (started) return
     codexHome = resolveCodexHome()
+    // 子の TMPDIR（childEnv の既定）を、それを渡して起動するより前に作る
+    mkdirSync(tmpRoot, { recursive: true })
     const r = await execFileP(bin, ['--version'], { env: childEnv(), timeout: 30000 })
     if (r.err) throw new AdapterError('prereq', `codex を実行できない（${bin}）: ${r.err.code ?? r.err.message}`)
     // 対話シェルを事前に塞げる構成かを確かめる（TTY_OFF。確かめられない・効かない環境では止める。exec は 1 度も起動しない）
@@ -514,7 +518,6 @@ export function createAdapter(cfg) {
     guardScript = findGuardScript({ toolConfig: tc, skillDir: cfg.skillDir, mainRoot: cfg.mainRoot })
     if (!guardScript) throw new AdapterError('prereq', GUARD_SCRIPT_MISSING)
     if (!existsSync(HOOK_SCRIPT)) throw new AdapterError('prereq', 'codex-hook.sh が見つからない')
-    mkdirSync(tmpRoot, { recursive: true })
     started = true
   }
 

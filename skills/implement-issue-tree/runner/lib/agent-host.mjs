@@ -517,7 +517,7 @@ export function createAgentHost({ adapter, cfg }) {
     let worktreeGitdir = null
     if (opts.isolation === 'worktree') {
       // 失敗は例外のまま上げる（契約で throw してよい 2 つのうちの 1 つ。gitdir の検証失敗も作成失敗として扱う）
-      const wt = makeWorktree({ mainRoot, runId, n })
+      const wt = await makeWorktree({ mainRoot, runId, n })
       cwd = wt.path
       worktreePath = wt.path
       if (wt.gitdir !== undefined) worktreeGitdir = verifyWorktreeGitdir(mainRoot, wt.gitdir)

@@ -3,11 +3,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { trackTmp } from './lib/tmp-track.mjs'
 import { maskUrlCredentials, createSequencer, createWorktree, newRunId, resolveDefaultBranch, resolveMainRoot, verifyWorktreeGitdir, worktreeNames } from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
+import * as worktreeMod from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' }
 const git = (cwd, ...args) => {
@@ -58,13 +59,13 @@ test('worktreeNames: <main>/.claude/worktrees/<runId>-<N> と worktree-<runId>-<
   for (const n of [0, -1, 1.5, '1', NaN]) assert.throws(() => worktreeNames('/m', 'wf_4b37e3aa-d5b', n), /通し番号/, String(n))
 })
 
-test('createWorktree: 最新の origin/<既定> を起点に、規定のパス・ブランチで作る（ローカル HEAD ではない）', () => {
+test('createWorktree: 最新の origin/<既定> を起点に、規定のパス・ブランチで作る（ローカル HEAD ではない）', async () => {
   const sb = sandbox()
   const newest = sb.advance() // ローカルの main は古いまま、origin だけ進める
   const localHead = git(sb.main, 'rev-parse', 'HEAD')
   assert.notEqual(newest, localHead)
   const runId = newRunId()
-  const wt = createWorktree({ mainRoot: sb.main, runId, n: 3 })
+  const wt = await createWorktree({ mainRoot: sb.main, runId, n: 3 })
   assert.equal(wt.path, join(sb.main, '.claude', 'worktrees', `${runId}-3`))
   assert.equal(wt.branch, `worktree-${runId}-3`)
   assert.equal(wt.baseSha, newest)
@@ -77,10 +78,10 @@ test('createWorktree: 最新の origin/<既定> を起点に、規定のパス�
   assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${wt.path}`))
 })
 
-test('createWorktree: lock の理由は Claude Code の形（ホストの worktree-remove.sh が解釈する正規表現に一致）。lock:false では付けない', () => {
+test('createWorktree: lock の理由は Claude Code の形（ホストの worktree-remove.sh が解釈する正規表現に一致）。lock:false では付けない', async () => {
   const sb = sandbox()
-  const a = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, pid: 4242 })
-  const b = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 2, lock: false })
+  const a = await createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, pid: 4242 })
+  const b = await createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 2, lock: false })
   const porcelain = git(sb.main, 'worktree', 'list', '--porcelain').split('\n\n')
   const blockA = porcelain.find((blk) => blk.includes(`worktree ${a.path}`))
   const blockB = porcelain.find((blk) => blk.includes(`worktree ${b.path}`))
@@ -90,33 +91,33 @@ test('createWorktree: lock の理由は Claude Code の形（ホストの worktr
   assert.ok(!/^locked/m.test(blockB))
 })
 
-test('createWorktree: 連続して作っても番号ごとに別の worktree になり、同じ番号の再作成は例外', () => {
+test('createWorktree: 連続して作っても番号ごとに別の worktree になり、同じ番号の再作成は例外', async () => {
   const sb = sandbox()
   const runId = newRunId()
-  const a = createWorktree({ mainRoot: sb.main, runId, n: 1, lock: false })
-  const b = createWorktree({ mainRoot: sb.main, runId, n: 2, lock: false })
+  const a = await createWorktree({ mainRoot: sb.main, runId, n: 1, lock: false })
+  const b = await createWorktree({ mainRoot: sb.main, runId, n: 2, lock: false })
   assert.notEqual(a.path, b.path)
-  assert.throws(() => createWorktree({ mainRoot: sb.main, runId, n: 1, lock: false }), /git worktree が失敗/)
+  await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId, n: 1, lock: false }), /git worktree が失敗/)
 })
 
-test('createWorktree: fetch に失敗したら例外（古い起点で隔離を作らない）。fetch:false ならローカルの origin/<既定> を使う', () => {
+test('createWorktree: fetch に失敗したら例外（古い起点で隔離を作らない）。fetch:false ならローカルの origin/<既定> を使う', async () => {
   const sb = sandbox()
   git(sb.main, 'remote', 'set-url', 'origin', join(sb.root, 'missing.git'))
-  assert.throws(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1 }), /git fetch が失敗/)
-  const wt = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 2, fetch: false, lock: false })
+  await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1 }), /git fetch が失敗/)
+  const wt = await createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 2, fetch: false, lock: false })
   assert.equal(wt.baseSha, git(sb.main, 'rev-parse', 'refs/remotes/origin/main'))
 })
 
-test('createWorktree: 不正な基点ブランチ名は例外', () => {
+test('createWorktree: 不正な基点ブランチ名は例外', async () => {
   const sb = sandbox()
   for (const bad of ['-x', 'a b', 'a;b', '$(x)', 'a..b', 'a@{1}', '@{-1}', 'a~1', 'x.lock', '/a', 'a//b']) {
-    assert.throws(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, baseBranch: bad }), /基点ブランチ名/, bad)
+    await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, baseBranch: bad }), /基点ブランチ名/, bad)
   }
 })
 
-test('resolveMainRoot: linked worktree の中から呼んでも本体を返す', () => {
+test('resolveMainRoot: linked worktree の中から呼んでも本体を返す', async () => {
   const sb = sandbox()
-  const wt = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, lock: false })
+  const wt = await createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, lock: false })
   assert.equal(resolveMainRoot(wt.path), sb.main)
   assert.equal(resolveMainRoot(sb.main), sb.main)
 })
@@ -132,18 +133,18 @@ test('resolveDefaultBranch: origin/HEAD を優先し、無ければ origin/main�
   assert.equal(resolveDefaultBranch(sb.main), 'master')
 })
 
-test('createWorktree: メイン worktree が相対パス・pid が整数でないときは例外', () => {
+test('createWorktree: メイン worktree が相対パス・pid が整数でないときは例外', async () => {
   const sb = sandbox()
-  assert.throws(() => createWorktree({ mainRoot: 'rel/main', runId: newRunId(), n: 1 }), /絶対パス/)
+  await assert.rejects(() => createWorktree({ mainRoot: 'rel/main', runId: newRunId(), n: 1 }), /絶対パス/)
   assert.throws(() => worktreeNames('rel', 'wf_4b37e3aa-d5b', 1), /絶対パス/)
   for (const pid of [0, -1, 1.5, '1', NaN, '1; x']) {
-    assert.throws(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, pid }), /pid/, String(pid))
+    await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, pid }), /pid/, String(pid))
   }
 })
 
-test('createWorktree: 先頭が - のパスにならない（-- で区切って渡す）', () => {
+test('createWorktree: 先頭が - のパスにならない（-- で区切って渡す）', async () => {
   const sb = sandbox()
-  const wt = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, lock: false })
+  const wt = await createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, lock: false })
   assert.ok(wt.path.startsWith('/'))
 })
 
@@ -153,22 +154,22 @@ test('maskUrlCredentials: URL の user:pass@ を伏せ、認証情報の無い U
   assert.equal(maskUrlCredentials('https://github.com/o/r.git'), 'https://github.com/o/r.git')
 })
 
-test('git の失敗文に載る URL の認証情報は伏せられる', () => {
+test('git の失敗文に載る URL の認証情報は伏せられる', async () => {
   const sb = sandbox()
   git(sb.main, 'remote', 'set-url', 'origin', 'https://user:SECRETPASS@127.0.0.1:1/o/r.git')
-  assert.throws(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1 }), (e) => !e.message.includes('SECRETPASS'))
+  await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1 }), (e) => !e.message.includes('SECRETPASS'))
 })
 
-test('createWorktree: gitdir は作成直後に git へ問い合わせた <main>/.git/worktrees/<name> の realpath（HIGH-2）', () => {
+test('createWorktree: gitdir は作成直後に git へ問い合わせた <main>/.git/worktrees/<name> の realpath（HIGH-2）', async () => {
   const sb = sandbox()
   const runId = newRunId()
-  const wt = createWorktree({ mainRoot: sb.main, runId, n: 1, lock: false })
+  const wt = await createWorktree({ mainRoot: sb.main, runId, n: 1, lock: false })
   assert.equal(wt.gitdir, realpathSync(join(sb.main, '.git', 'worktrees', `${runId}-1`)))
 })
 
-test('verifyWorktreeGitdir: メインの .git/worktrees/ の直下だけを通す（symlink で外へ向けた値・入れ子・相対パスは例外）', () => {
+test('verifyWorktreeGitdir: メインの .git/worktrees/ の直下だけを通す（symlink で外へ向けた値・入れ子・相対パスは例外）', async () => {
   const sb = sandbox()
-  const wt = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, lock: false })
+  const wt = await createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, lock: false })
   assert.equal(verifyWorktreeGitdir(sb.main, wt.gitdir), wt.gitdir)
   const outside = join(sb.root, 'outside')
   mkdirSync(join(outside, 'x'), { recursive: true })
@@ -177,4 +178,154 @@ test('verifyWorktreeGitdir: メインの .git/worktrees/ の直下だけを通�
   for (const bad of [outside, link, join(sb.main, '.git'), join(sb.main, '.git', 'worktrees'), join(wt.gitdir, 'logs'), 'rel/x']) {
     assert.throws(() => verifyWorktreeGitdir(sb.main, bad), /git ディレクトリ/, bad)
   }
+})
+
+// ---------------------------------------------------------------------------
+// 継いだ git の環境変数（#860）・fetch の時間切れ（#861）・lock 失敗の片づけ（#862）
+// ---------------------------------------------------------------------------
+
+/** process.env を一時的に書き換えて fn を待つ（undefined は削除）。終わったら元へ戻す。 */
+async function withEnv(vars, fn) {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]))
+  for (const [k, v] of Object.entries(vars)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+  try {
+    return await fn()
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+  }
+}
+/** 別のリポジトリ（sandbox の other）を指す git の位置の環境変数。継いだまま起動すると git の対象が cwd でなくなる。 */
+const foreignGitEnv = (sb) => ({ GIT_DIR: join(sb.other, '.git'), GIT_WORK_TREE: sb.other, GIT_COMMON_DIR: join(sb.other, '.git'), GIT_INDEX_FILE: join(sb.other, '.git', 'index') })
+const REAL_GIT = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim()
+/** 指定の git サブコマンド（"worktree lock" 等）だけ失敗し、ほかは本物の git へ渡す偽 git を置いたディレクトリ。 */
+function fakeGitDir(root, failing) {
+  const dir = join(root, `fakegit-${failing.length}-${Math.random().toString(16).slice(2)}`)
+  mkdirSync(dir)
+  const cases = failing.map((sub) => `  "${sub}") echo "fatal: injected ${sub} failure" >&2; exit 1 ;;`).join('\n')
+  writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase "$1 $2" in\n${cases}\nesac\nexec ${JSON.stringify(REAL_GIT)} "$@"\n`)
+  chmodSync(join(dir, 'git'), 0o755)
+  return dir
+}
+
+test('gitLocationFreeEnv: --local-env-vars の一覧・GIT_CONFIG_KEY/VALUE_<n>・探索の範囲を変える変数を外し、ほかは残す（元は変えない）', () => {
+  assert.equal(typeof worktreeMod.gitLocationFreeEnv, 'function')
+  const local = spawnSync('git', ['rev-parse', '--local-env-vars'], { encoding: 'utf8', env: ENV }).stdout.split('\n').filter(Boolean)
+  assert.ok(local.includes('GIT_DIR'))
+  const extra = ['GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CONFIG_KEY_12', 'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_NAMESPACE', 'GIT_EXEC_PATH']
+  const keep = { PATH: '/bin', HOME: '/h', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'a', GH_REPO: 'o/r' }
+  const env = { ...keep, ...Object.fromEntries([...local, ...extra].map((k) => [k, 'x'])) }
+  assert.deepEqual(worktreeMod.gitLocationFreeEnv(env), keep)
+  assert.equal(env.GIT_DIR, 'x', '元の env は変えない')
+  // 外す一覧は git 自身の一覧をすべて含む（git の版が上がって増えたら落ちる）
+  for (const k of local) assert.ok(worktreeMod.GIT_LOCATION_ENV_VARS.includes(k), k)
+  assert.deepEqual(worktreeMod.gitSafeEnv(env), { ...keep, GIT_TERMINAL_PROMPT: '0' })
+})
+
+test('resolveMainRoot: 別のリポジトリを指す GIT_DIR 等を継いでも cwd のリポジトリのメイン worktree を返す（#860）', async () => {
+  const sb = sandbox()
+  await withEnv(foreignGitEnv(sb), () => {
+    assert.equal(resolveMainRoot(sb.main), sb.main)
+    assert.equal(resolveDefaultBranch(sb.main), 'main')
+  })
+})
+
+test('createWorktree: 別のリポジトリを指す GIT_DIR 等を継いでも、作る先は mainRoot のリポジトリ（#860）', async () => {
+  const sb = sandbox()
+  const before = git(sb.other, 'worktree', 'list', '--porcelain')
+  const runId = newRunId()
+  await withEnv(foreignGitEnv(sb), () => createWorktree({ mainRoot: sb.main, runId, n: 1, lock: false }).catch(() => null))
+  const { path } = worktreeNames(sb.main, runId, 1)
+  assert.equal(git(sb.other, 'worktree', 'list', '--porcelain'), before, '別のリポジトリには作らない')
+  assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${path}`), 'mainRoot のリポジトリに作る')
+})
+
+test('createWorktree: origin が応答しない fetch の間もイベントループは止まらず、設定した時間切れでプロセスグループを止めて例外にする（#861）', async () => {
+  const sb = sandbox()
+  const pidFile = join(sb.root, 'ssh.pid')
+  git(sb.main, 'remote', 'set-url', 'origin', 'ssh://git@example.invalid/o/r.git')
+  // ssh の代わりに応答しない処理を起動させる（pid を書いてから 30 秒眠る）
+  git(sb.main, 'config', 'core.sshCommand', `echo $$ > ${JSON.stringify(pidFile)}; sleep 30; false`)
+  let ticks = 0
+  const timer = setInterval(() => { ticks++ }, 20)
+  const t0 = Date.now()
+  try {
+    await assert.rejects(Promise.resolve().then(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetchTimeoutMs: 300 })), /git fetch が 300 ms で時間切れ/)
+  } finally {
+    clearInterval(timer)
+  }
+  const elapsed = Date.now() - t0
+  assert.ok(elapsed < 5000, `時間切れで戻る（${elapsed} ms）`)
+  assert.ok(ticks >= 5, `fetch の間も並行するタイマが発火する（${ticks} 回）`)
+  // ssh の代わりの処理（プロセスグループの一員）も止まっている。回収されるまで短く待つ
+  assert.ok(existsSync(pidFile), 'sshCommand が起動している')
+  const pid = Number(readFileSync(pidFile, 'utf8').trim())
+  let alive = true
+  for (let i = 0; i < 40 && alive; i++) {
+    try { process.kill(pid, 0); await new Promise((r) => setTimeout(r, 25)) } catch { alive = false }
+  }
+  assert.equal(alive, false, 'fetch の孫（sshCommand）が残らない')
+  // fetch より後へ進んでいない（worktree を作っていない）
+  assert.equal(existsSync(join(sb.main, '.claude', 'worktrees')), false)
+})
+
+test('killGitSync: 実行中の fetch のプロセスグループを同期で止め、createWorktree は例外で戻る（ランナーの終了時の後片づけ。LOW-11）', async () => {
+  assert.equal(typeof worktreeMod.killGitSync, 'function')
+  const sb = sandbox()
+  git(sb.main, 'remote', 'set-url', 'origin', 'ssh://git@example.invalid/o/r.git')
+  const started = join(sb.root, 'started')
+  git(sb.main, 'config', 'core.sshCommand', `: > ${JSON.stringify(started)}; sleep 30; false`)
+  const p = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetchTimeoutMs: 20_000 })
+  p.catch(() => {})
+  // sshCommand まで起動したら止める（実時間で長く待たない。上限 5 秒）
+  for (let i = 0; i < 200 && !existsSync(started); i++) await new Promise((r) => setTimeout(r, 25))
+  assert.ok(existsSync(started), 'fetch が sshCommand まで進んだ')
+  const t0 = Date.now()
+  worktreeMod.killGitSync()
+  await assert.rejects(p, /git fetch が失敗/)
+  assert.ok(Date.now() - t0 < 5000)
+})
+
+test('createWorktree: 時間切れの値が正の整数でなければ例外', async () => {
+  const sb = sandbox()
+  for (const bad of [0, -1, 1.5, '100', NaN]) {
+    await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, fetchTimeoutMs: bad }), /fetchTimeoutMs/, String(bad))
+    await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, gitTimeoutMs: bad }), /gitTimeoutMs/, String(bad))
+  }
+})
+
+test('createWorktree: worktree lock が失敗したら、作った worktree とブランチを片づけてから元の例外を投げる（#862）', async () => {
+  const sb = sandbox()
+  const list = () => git(sb.main, 'worktree', 'list', '--porcelain')
+  const branches = () => git(sb.main, 'branch', '--list', '--format=%(refname)')
+  const [wl, br] = [list(), branches()]
+  const runId = newRunId()
+  const fake = fakeGitDir(sb.root, ['worktree lock'])
+  await withEnv({ PATH: `${fake}:${process.env.PATH}` }, () =>
+    assert.rejects(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false }), (e) => /git worktree が失敗/.test(e.message) && /injected worktree lock failure/.test(e.message) && !/片づけ/.test(e.message)))
+  assert.equal(list(), wl, 'worktree の一覧が作成前と同じ')
+  assert.equal(branches(), br, 'ブランチが作成前と同じ')
+  assert.equal(existsSync(join(sb.main, '.claude', 'worktrees', `${runId}-1`)), false)
+})
+
+test('createWorktree: lock の後の片づけも失敗したら、元の失敗の文面を保ち、残ったパスとブランチを足す（#862）', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const { path, branch } = worktreeNames(sb.main, runId, 1)
+  const fake = fakeGitDir(sb.root, ['worktree lock', 'worktree remove'])
+  await withEnv({ PATH: `${fake}:${process.env.PATH}` }, () =>
+    assert.rejects(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false }), (e) => {
+      assert.match(e.message, /^git worktree が失敗した（終了コード 1）: fatal: injected worktree lock failure/)
+      assert.ok(e.message.includes(path), e.message)
+      assert.ok(e.message.includes(branch), e.message)
+      return true
+    }))
+})
+
+test('createWorktree: add 自体の失敗（同じ番号の衝突）では、既にある worktree とブランチを消さない（#862）', async () => {
+  const sb = sandbox()
+  const runId = newRunId()
+  const first = await createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false })
+  await assert.rejects(() => createWorktree({ mainRoot: sb.main, runId, n: 1, fetch: false, lock: false }), /git worktree が失敗/)
+  assert.ok(git(sb.main, 'worktree', 'list', '--porcelain').includes(`worktree ${first.path}`))
+  assert.equal(git(sb.main, 'rev-parse', '--verify', '--quiet', `refs/heads/${first.branch}`).length, 40)
 })
