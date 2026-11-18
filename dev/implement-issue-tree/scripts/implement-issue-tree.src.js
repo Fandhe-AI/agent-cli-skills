@@ -5619,7 +5619,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
             : []),
         ]
       : []
-  // push しない Review fix は、どの worktree も握っていないブランチへ名前指定の git checkout で付けてコミットする（ref は commit で自然に進む。隔離 worktree のガードは refs/heads/* を直接書き換える git コマンドを拒否するが、この経路は拒否されない。Issue #878）。使用中なら git が拒否するので中止する（実装側が NO_PUSH_STEP で detach 済みなら未使用になる）。ブランチを握ったまま終わると次の fix・recover-prep・push が失敗するため、全ての出口で git checkout --detach を必須にする。
+  // push しない Review fix は、取得から作業・コミットまで detached HEAD で行い、ブランチへ付くのは手順 4 のコミット後の先端更新の数コマンドの間だけにする（Issue #878）。隔離 worktree のガードは refs/heads/* を直接書き換える git コマンド（update-ref・branch -f）を拒否するが、git checkout <branch>・git merge --ff-only・git checkout --detach は拒否されない。以前の update-ref 方式は拒否され、名前指定で取得する方式は手順 1〜3 の早い出口（マージ解消不能・P0/P1 修正不能・テスト不通過）や detach 失敗でブランチを握ったまま終わり、次の fix ラウンドが already used で commitFailed になった。detached で作業すれば、失敗したラウンドはブランチを一切握らない。ブランチを握ったままだと次の fix・recover-prep・push が失敗するため、付いた後は成否にかかわらず直ちに detach する。
   const checkoutInstructions = pushAfterFix
     ? [
         // 修正作業（手順 2〜3）の前に base 取り込みを済ませておく。作業後に base コンフリクトを検出すると、そのコミットは detached HEAD 上にしか存在せず worktree 破棄で失われる（Issue #435）。取り込みは必須実行とし「必要な場合は」の条件文にしない。
@@ -5627,7 +5627,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
       ]
     : [
         `1. ${WT_ISO}push 前のローカル修正のため fetch は不要。`,
-        `   git checkout ${branch}（名前指定。--detach は付けない）でブランチへ付ける。git が already used by worktree 等で拒否したら何も変更せず中止し、pushed: false・commitFailed: true・summary に理由（修正コミット未作成）で返す。`,
+        `   git checkout --detach ${branch} で detached HEAD として取得し、作業・コミットも detached HEAD で行う（別 worktree で checkout 済みでも衝突せず、途中で失敗してもブランチを握らない）。`,
         `   マージコンフリクトの解消が必要な場合は git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で最新化してから git merge origin/${baseBranch} で解消する（Issue #361）`,
         `   （ローカル ${baseBranch} でなく origin/${baseBranch} を使う。Issue #315）。`,
       ]
@@ -5640,8 +5640,8 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     : [
         `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
         commitlintCheckInstruction,
-        `   ブランチの ref を直接書き換える git コマンド（git branch -f 等。ref は commit で進む）は使わない（隔離 worktree のガードが拒否する）。コミット後に git rev-parse refs/heads/${branch} と git rev-parse HEAD が一致することを確かめ、不一致・コミット失敗・条件不成立なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
-        `   終了処理（成功・中止・commitFailed のすべての出口で必須。最後に必ず実行する）: git checkout --detach を実行し、git rev-parse --abbrev-ref HEAD が HEAD を返すことを確かめる（ブランチを握ったままだと次の fix ラウンド・recover-prep・push が失敗する）。`,
+        `   ブランチ ${branch} の先端更新（コミット後にだけ行う。git update-ref・git branch -f は隔離 worktree のガードが拒否するので使わない）: (a) 修正後の git rev-parse HEAD の値を <new> として字面で控える（シェル変数不可）。修正コミットが無く HEAD が取得時から動いていなければ先端更新は不要で、(e) へ進む。(b) git checkout --no-guess ${branch} を実行する（--no-guess は origin にだけある名前から新規ブランチを作らせないため）。git が already used by worktree 等で拒否したら、detached のまま pushed: false・commitFailed: true・summary に理由と <new> で返す。(c) git merge --ff-only <new> を実行する。(d) git rev-parse refs/heads/${branch} が <new> と一致するか確かめる。(e) (b) でブランチへ付けたら、(c)(d) の成否にかかわらず直ちに git checkout --detach <new> を実行し、git rev-parse --abbrev-ref HEAD が HEAD であることを確かめる。ff できない・一致しない・detach できない場合は pushed: false・commitFailed: true・summary に理由と <new>。`,
+        `   ブランチへ付いている区間は (b) から (e) の数コマンドだけにする。手順 1〜3 の出口（マージ解消不能・P0/P1 修正不能・テスト不通過）ではブランチへ付かず、detached のまま返す。`,
         `   レビュースレッドの resolve は行わない（push 前の Review ループ）。`,
       ]
   return [
