@@ -2421,7 +2421,7 @@ return i
 
 
 
-const cj='7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだら、まず git status --porcelain --untracked-files=no の出力が空であること（追跡ファイルに未コミットの変更が無いこと。未追跡ファイルは対象外）を確かめる。空でない（またはコマンドが失敗した）ときは git add -u で追跡ファイルの変更だけを加え、手順 6 と同じ規約で追加のコミットとして積む（既存コミットの amend はしない）。積めなければ変更を残したまま進み summary にその旨を書く（失敗にはしない）。続けて、返却する branch 名を控えてから git checkout --detach を実行して終了する（必須。ブランチをどの worktree からも外す。checkout したままだと、後続の Review 修正が別の worktree からこのブランチの先端を更新できない）。'
+const cj='7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだら、まず git status --porcelain --untracked-files=no の出力が空であること（追跡ファイルに未コミットの変更が無いこと。未追跡ファイルは対象外）を確かめる。空でない（またはコマンドが失敗した）ときは git add -u で追跡ファイルの変更だけを加え、手順 6 と同じ規約で追加のコミットとして積む（既存コミットの amend はしない）。積めなければ変更を残したまま進み summary にその旨を書く（失敗にはしない）。続けて、返却する branch 名を控えてから git checkout --detach を実行して終了する（必須。ブランチをどの worktree からも外す。checkout したままだと、後続の Review 修正が別の worktree からこのブランチへ付けられない）。'
 const uS='（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）'
 const lP='不要な worktree を git worktree remove で手動削除してから再実行すること'
 const g1='ディスク枯渇防止のため以降の'+iQ+'。'
@@ -5618,7 +5618,7 @@ const p=d
 ]
 :[
 `1. ${Da}push 前のローカル修正のため fetch は不要。`,
-`   git checkout --detach ${f} で detached HEAD として取得する（別 worktree で checkout 済みでも衝突しない）。`,
+`   git checkout ${f}（名前指定。--detach は付けない）でブランチへ付ける。git が already used by worktree 等で拒否したら何も変更せず中止し、pushed: false・commitFailed: true・summary に理由（修正コミット未作成）で返す。`,
 `   マージコンフリクトの解消が必要な場合は git fetch origin ${I$}:refs/remotes/origin/${I$} で最新化してから git merge origin/${I$} で解消する（Issue #361）`,
 `   （ローカル ${I$} でなく origin/${I$} を使う。Issue #315）。`,
 ]
@@ -5631,9 +5631,8 @@ Tv,
 :[
 `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
 Tv,
-`   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に git rev-parse HEAD の値を <old> として字面で控え（シェル変数不可）、更新直前に git rev-parse refs/heads/${f} が <old> と違えば中止。git worktree list --porcelain で refs/heads/${f} を checkout 中の worktree を探す。`,
-`   あれば中止（その worktree を含め、カレントの worktree の外には一切触れない。使用中のブランチだけを動かすと、その worktree の index・作業ツリーと食い違う）。無ければ git update-ref refs/heads/${f} <HEAD の sha> <old>。`,
-`   中止・条件不成立・失敗・git rev-parse refs/heads/${f} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
+`   ブランチの ref を直接書き換える git コマンド（git branch -f 等。ref は commit で進む）は使わない（隔離 worktree のガードが拒否する）。コミット後に git rev-parse refs/heads/${f} と git rev-parse HEAD が一致することを確かめ、不一致・コミット失敗・条件不成立なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
+`   終了処理（成功・中止・commitFailed のすべての出口で必須。最後に必ず実行する）: git checkout --detach を実行し、git rev-parse --abbrev-ref HEAD が HEAD を返すことを確かめる（ブランチを握ったままだと次の fix ラウンド・recover-prep・push が失敗する）。`,
 `   レビュースレッドの resolve は行わない（push 前の Review ループ）。`,
 ]
 return[
