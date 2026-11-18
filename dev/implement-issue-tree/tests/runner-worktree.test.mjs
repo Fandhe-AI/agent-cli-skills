@@ -497,15 +497,18 @@ test('createWorktree: 1 件目の lock の失敗の片づけが終わるまで�
   assert.deepEqual(results.map((r) => r.status), ['rejected', 'fulfilled'], results.map((r) => r.reason?.message).join(' / '))
   assert.match(results[0].reason.message, /injected worktree lock failure/)
   const events = readFileSync(log, 'utf8').trim().split('\n')
-  assert.deepEqual(events, [
+  // どちらがキューに先に入るかは決まっていない（createWorktree は基点ブランチ名の検査〔非同期の git〕の後でキューに入るため、
+  // 呼び出し順と投入順は一致しない）。示したいのは「1 件目の add〜片づけと 2 件目の add〜lock が重ならない」ことだけ
+  const block1 = [
     '1 worktree-add start', '1 worktree-add end',
     '1 worktree-lock start', '1 worktree-lock end',
     '1 worktree-unlock start', '1 worktree-unlock end',
     '1 worktree-remove start', '1 worktree-remove end',
     '1 branch--D start', '1 branch--D end',
-    '2 worktree-add start', '2 worktree-add end',
-    '2 worktree-lock start', '2 worktree-lock end',
-  ], '1 件目の add〜片づけの後に 2 件目の add が始まる')
+  ]
+  const block2 = ['2 worktree-add start', '2 worktree-add end', '2 worktree-lock start', '2 worktree-lock end']
+  const expected = events[0]?.startsWith('1 ') ? [...block1, ...block2] : [...block2, ...block1]
+  assert.deepEqual(events, expected, '2 件の add〜片づけが重ならない（どちらが先でもよい）')
   assert.equal(existsSync(worktreeNames(sb.main, runId, 1).path), false)
   assert.ok(existsSync(results[1].value.path))
 })
