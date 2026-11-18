@@ -726,6 +726,25 @@ function capText(str, max = 2000) {
   return s.length > max ? `${s.slice(0, max)}（省略）` : s
 }
 
+// 状態ファイルへ書く自由文の上限（Issue #878 追記）。lastUnresolvedInfo・outOfScopeLog の各行・lastUnresolvedComments の text は、再開時に復元して issue 化候補の記録や最終 note に使う（表示専用ではなく、射影から外すと再開で記録が失われ次の書き込みで空に上書きされる）一方、状態の読込・照合では読込エージェントが全文を書き写すため、長いと書き写し違いで項目ごと state-unverified になる。書くときに短い上限へ切る。文字単位（コードポイント）で切り、サロゲートペアを割らない。上限は接尾辞（省略）込みで、すでに上限以内の値は変えない（再書き込みで冪等）。上限を入れる前に書かれた長い値は、書き直されるまでそのまま残る。
+const STATE_TEXT_MAX = 300
+const STATE_COMMENT_TEXT_MAX = 200
+function capStateText(v, max = STATE_TEXT_MAX) {
+  if (!isStr(v)) return v
+  const cps = Array.from(v)
+  return cps.length > max ? `${cps.slice(0, max - 4).join('')}（省略）` : v
+}
+function capStatePatchText(patch) {
+  const out = { ...patch }
+  if (isStr(out.lastUnresolvedInfo)) out.lastUnresolvedInfo = capStateText(out.lastUnresolvedInfo)
+  if (Array.isArray(out.outOfScopeLog)) out.outOfScopeLog = out.outOfScopeLog.map((v) => capStateText(v))
+  if (Array.isArray(out.lastUnresolvedComments)) {
+    out.lastUnresolvedComments = out.lastUnresolvedComments.map((c) =>
+      c && typeof c === 'object' && !Array.isArray(c) ? { ...c, text: capStateText(c.text, STATE_COMMENT_TEXT_MAX) } : c)
+  }
+  return out
+}
+
 // 未信頼データ埋め込み用のデータ境界マーカートークン。固定文字列だと境界偽装できるため呼び出しごとに予測不能な値にする。Workflow harness は乱数・時刻 API を提供しないため、 /dev/urandom 由来の seed（ランごとに seed エージェントで取得し、ラン間では永続化しない）を内容に混ぜて導出する。トークンは seed と内容だけで決まるので、seed エージェントの結果が再生される resume でのみ同じトークンが再現する（新規ランは別の seed になる）。注意: 内容が同じ呼び出しは同じトークンに
 // なる。呼び出しごとに一意であるべき用途（測定スクリプトの nonce など）は、呼び出し連番を内容に含めること。
 let boundaryNonceSeed = ''
@@ -2420,8 +2439,8 @@ function applyPrereqTransitions(probe, targets, done, failedSet, prHints, branch
 }
 
 // targets の前提完了を確認するプローブエージェント向けプロンプト（Issue #442）。読み取り専用の 3 コマンドに限定し、Issue/PR の本文・タイトル・コメントは一切取得させない（非信頼自由文をホストの遷移判定へ持ち込まない設計。mergeVerifyPrompt と同型の権限境界）。実装プロンプトと修正プロンプトで共通の定型句（生成物の予算のため定数化。1 か所の変更が両プロンプトに効く。改行は入れない: テストが 1 行として照合する）。detach の前に追跡ファイルの未コミット変更を確かめる（Issue #761。detach 自体は作業ツリーに触れず変更は失われないが、確認を明記して同種の指摘を防ぐ）。確認は未追跡ファイルを対象外とし（ビルド成果物でも失敗にしない）、add -u で追跡ファイルに限る（秘密情報や成果物を混ぜない）。push 済みの先端を書き換えないよう amend せず追加のコミットにし、積めなくても失敗終端にしない。最後の detach: 後続の Review fix は隔離された別 worktree で動き、自分の worktree の外へ git -C・cd で触れられない。実装 worktree がブランチを
-// checkout したままだと、fix は先端を進められず commitFailed で終わる（使用中のブランチだけを update-ref で動かすと、その worktree の index と食い違う）。 detach 済みの worktree は、中断後の再実行で recover-prep.sh がブランチへ付け直す（Issue #731 と同じ経路）。
-const NO_PUSH_STEP = '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだら、まず git status --porcelain --untracked-files=no の出力が空であること（追跡ファイルに未コミットの変更が無いこと。未追跡ファイルは対象外）を確かめる。空でない（またはコマンドが失敗した）ときは git add -u で追跡ファイルの変更だけを加え、手順 6 と同じ規約で追加のコミットとして積む（既存コミットの amend はしない）。積めなければ変更を残したまま進み summary にその旨を書く（失敗にはしない）。続けて、返却する branch 名を控えてから git checkout --detach を実行して終了する（必須。ブランチをどの worktree からも外す。checkout したままだと、後続の Review 修正が別の worktree からこのブランチの先端を更新できない）。'
+// checkout したままだと、fix はそのブランチへ git checkout で付けられず commitFailed で終わる（使用中のブランチを別の worktree が握ったまま進めると、その worktree の index と食い違う）。 detach 済みの worktree は、中断後の再実行で recover-prep.sh がブランチへ付け直す（Issue #731 と同じ経路）。
+const NO_PUSH_STEP = '7. push・PR 作成はここでは行わない。ローカルブランチにコミットを積んだら、まず git status --porcelain --untracked-files=no の出力が空であること（追跡ファイルに未コミットの変更が無いこと。未追跡ファイルは対象外）を確かめる。空でない（またはコマンドが失敗した）ときは git add -u で追跡ファイルの変更だけを加え、手順 6 と同じ規約で追加のコミットとして積む（既存コミットの amend はしない）。積めなければ変更を残したまま進み summary にその旨を書く（失敗にはしない）。続けて、返却する branch 名を控えてから git checkout --detach を実行して終了する（必須。ブランチをどの worktree からも外す。checkout したままだと、後続の Review 修正が別の worktree からこのブランチへ付けられない）。'
 const NO_PR_NUMBER_NOTE = '（prNumber は PR 未作成のため返却しない。返しても 0 として扱われる）'
 const WT_RM_NOTE = '不要な worktree を git worktree remove で手動削除してから再実行すること'
 const DISK_HALT_NOTE = 'ディスク枯渇防止のため以降の' + HALT_NEW + '。'
@@ -2960,13 +2979,21 @@ function canonicalJson(v) {
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 const isNonNegInt = (x) => isInt(x) && x >= 0
 
+// 照合・採用する項目の射影（Issue #878 追記）。note は fix・monitor・merge-exec の要約が入る自由文で 500 文字を超え得て、読込エージェントが書き写し違えると項目ごと照合に落ちる（実機: 530〜593 文字の 4 件）。note は書き込み専用で読み込み後の判断に使わないため、読込側・検証側（state.sh verify の ST_VERIFY_PROJECT）・ホストの再計算の 3 つに同じ射影（note を除く）を掛け、書き写させない。返された項目に note があっても捨ててから照合する。状態ファイルの note は消えない（state.sh merge は項目を欄単位で足す）。
+const projectStateItem = (v) => {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return v
+  const { note: _n, ...rest } = v
+  return rest
+}
+
 function verifyLoadedItems(items, check) {
   const hashes = check?.fileExists === true && check.hashes ? check.hashes : null
   const adopted = {}
   const dropped = []
   const loaded = items && typeof items === 'object' && !Array.isArray(items) ? items : {}
-  for (const [k, val] of Object.entries(loaded)) {
+  for (const [k, raw] of Object.entries(loaded)) {
     const h = hashes && hasOwn(hashes, k) ? hashes[k] : ''
+    const val = projectStateItem(raw)
     if (/^[1-9]\d*$/.test(k) && /^[0-9a-f]{64}$/.test(h) && sha256Hex(canonicalJson(val)) === h) {
       adopted[k] = val
     } else {
@@ -3067,7 +3094,7 @@ async function loadState() {
       `1. ${STATE_FILE} が存在するか test -f で確認する。`,
       `2. ファイルが存在する場合:`,
       `   a. jq . ${STATE_FILE} でパースを試みる（jq の終了コードで成否を判断する）。`,
-      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。items は 5 件ずつ分けて読み、読めた分だけ返す（欠落キーはホストが再取得する。見えない値を推測で埋めない）。highWaterBytes は .perWorktreeByteReserveHighWater、highWaterVersion は .perWorktreeByteReserveHighWaterVersion の値（無ければ 0）。`,
+      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。items は 5 件ずつ分けて読み、読めた分だけ返す（欠落キーはホストが再取得する。見えない値を推測で埋めない）。各項目から note 欄は除いて返す（書き写さない。jq の map_values(del(.note)) 等。ホストは note を使わず、長い文字列の書き写し違いが照合を落とすため）。highWaterBytes は .perWorktreeByteReserveHighWater、highWaterVersion は .perWorktreeByteReserveHighWaterVersion の値（無ければ 0）。`,
       `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`,
       readOnly
         ? `3. ファイルが存在しない場合: 読み取り専用のためディレクトリもファイルも作らない。ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`
@@ -3117,7 +3144,7 @@ async function loadState() {
     const got = []
     for (let b = 0; b < chunks.length; b += 2) {
       got.push(...await Promise.all(chunks.slice(b, b + 2).map((ks) => runStateAgent(
-        `状態ファイル項目の読み取り（読み取り専用）。${TEMP_FILE_POLICY}\n次をそのまま実行し、出力 JSON を items として返す（推測で埋めない）:\njq -c --argjson k '${JSON.stringify(ks)}' '.items | with_entries(select(.key as $x | $k | index($x)))' ${STATE_FILE}`,
+        `状態ファイル項目の読み取り（読み取り専用）。${TEMP_FILE_POLICY}\n次をそのまま実行し、出力 JSON を items として返す（推測で埋めない）:\njq -c --argjson k '${JSON.stringify(ks)}' '.items | with_entries(select(.key as $x | $k | index($x))) | map_values(if type == "object" then del(.note) else . end)' ${STATE_FILE}`,
         { label: 'state:load-fill', schema: STATE_FILL_SCHEMA, isValid: isValidStateFillResult },
       ))))
     }
@@ -3188,7 +3215,7 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
   if (cleanupWorktreePath && cleanupMode === 'discard') sweepHeldPaths.add(cleanupWorktreePath)
   // discard で .worktree を空にする patch は、JSON マージには含めず、掃除エージェントの手順 2 に任せる（worktree が無くなったときだけ空にする）。先に空にすると、保持したときに状態ファイルから worktree の記録が消え、failed の書き戻しが失敗した場合に最終スイープの保持対象から外れる
   const deferWorktreeClear = cleanupMode === 'discard' && Boolean(cleanupWorktreePath) && clearWorktreeAfterCleanup && patchWorktree === ''
-  const mergePatch = deferWorktreeClear ? Object.fromEntries(Object.entries(patch).filter(([k]) => k !== 'worktree')) : patch
+  const mergePatch = capStatePatchText(deferWorktreeClear ? Object.fromEntries(Object.entries(patch).filter(([k]) => k !== 'worktree')) : patch)
 
   // 掃除担当エージェントのプロンプト。受け取る値は sanitizeWorktreePath / isValidBranchName で検証済みのパス・ブランチ名と固定文字列のみで、未信頼由来の自由文（patchJson）は含まない。.worktree のクリア（手順 2）は、削除対象が追跡中の worktree そのものの場合に限り、 worktree が無くなったときだけ行う（保持した worktree の記録は消さない）
   const cleanupPromptText = hasCleanup
@@ -4592,6 +4619,7 @@ function stopNote(f, b) {
 // 保存済み項目が patch の全キーで既に同じ値なら true（書いても何も変わらない）。status・note だけでなく patch に載る全キーを比べる: pr: 0 でクリアしたい項目の保存済み pr が 0 以外なら書く必要がある。 saved は loadState が内容照合を通した項目（adopted）のみ入る savedItems の値。照合できなかった項目・未保存の項目は undefined になり、省略せず書く側に倒れる。
 function isUnchangedStatePatch(saved, patch) {
   if (saved === null || typeof saved !== 'object' || Array.isArray(saved)) return false
+  // 注意（Issue #878）: loadState は note を読み込まない（projectStateItem）ため、読み込んだ saved に note は無く、note を持つ patch は常に「変化あり」として書かれる。note の差を無視すると、status が同じで理由だけ変わった blocked の note が状態ファイルで古いままになるため、比べて書く側に倒す（書き直しは再実行ごとに chunk 数ぶんのエージェント呼び出しで済む）。
   return Object.keys(patch).every((k) => hasOwn(saved, k) && JSON.stringify(saved[k]) === JSON.stringify(patch[k]))
 }
 
@@ -5610,7 +5638,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
             : []),
         ]
       : []
-  // push しない Review fix では detach で取得し、修正コミット後に旧値確認つきで先端更新する。ブランチを checkout 中の worktree があれば中止する（隔離されたエージェントは自分の worktree の外へ git -C・cd で触れられず、使用中 worktree を一緒に進める手段が無い。実装側が NO_PUSH_STEP で detach 済みなら未使用になる）。
+  // push しない Review fix は、取得から作業・コミットまで detached HEAD で行い、ブランチへ付くのは手順 4 のコミット後の先端更新の数コマンドの間だけにする（Issue #878）。隔離 worktree のガードは refs/heads/* を直接書き換える git コマンド（update-ref・branch -f）を拒否するが、git checkout <branch>・git merge --ff-only・git checkout --detach は拒否されない。以前の update-ref 方式は拒否され、名前指定で取得する方式は手順 1〜3 の早い出口（マージ解消不能・P0/P1 修正不能・テスト不通過）や detach 失敗でブランチを握ったまま終わり、次の fix ラウンドが already used で commitFailed になった。detached で作業すれば、失敗したラウンドはブランチを一切握らない。ブランチを握ったままだと次の fix・recover-prep・push が失敗するため、付いた後は成否にかかわらず直ちに detach する。
   const checkoutInstructions = pushAfterFix
     ? [
         // 修正作業（手順 2〜3）の前に base 取り込みを済ませておく。作業後に base コンフリクトを検出すると、そのコミットは detached HEAD 上にしか存在せず worktree 破棄で失われる（Issue #435）。取り込みは必須実行とし「必要な場合は」の条件文にしない。
@@ -5618,7 +5646,7 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
       ]
     : [
         `1. ${WT_ISO}push 前のローカル修正のため fetch は不要。`,
-        `   git checkout --detach ${branch} で detached HEAD として取得する（別 worktree で checkout 済みでも衝突しない）。`,
+        `   git checkout --detach ${branch} で detached HEAD として取得し、作業・コミットも detached HEAD で行う（別 worktree で checkout 済みでも衝突せず、途中で失敗してもブランチを握らない）。`,
         `   マージコンフリクトの解消が必要な場合は git fetch origin ${baseBranch}:refs/remotes/origin/${baseBranch} で最新化してから git merge origin/${baseBranch} で解消する（Issue #361）`,
         `   （ローカル ${baseBranch} でなく origin/${baseBranch} を使う。Issue #315）。`,
       ]
@@ -5631,9 +5659,8 @@ function fixPrompt(item, impl, finding, pushAfterFix = true, permittedNoPushReso
     : [
         `4. create-commit スキルに従いコミットする。push はしない（Review 通過後にまとめて push する）。`,
         commitlintCheckInstruction,
-        `   先端更新（git branch -f・旧値なし update-ref は禁止）: 手順 1 の detach 直後に git rev-parse HEAD の値を <old> として字面で控え（シェル変数不可）、更新直前に git rev-parse refs/heads/${branch} が <old> と違えば中止。git worktree list --porcelain で refs/heads/${branch} を checkout 中の worktree を探す。`,
-        `   あれば中止（その worktree を含め、カレントの worktree の外には一切触れない。使用中のブランチだけを動かすと、その worktree の index・作業ツリーと食い違う）。無ければ git update-ref refs/heads/${branch} <HEAD の sha> <old>。`,
-        `   中止・条件不成立・失敗・git rev-parse refs/heads/${branch} が HEAD と不一致なら pushed: false・commitFailed: true・summary に理由と HEAD の sha。`,
+        `   ブランチ ${branch} の先端更新（コミット後にだけ行う。git update-ref・git branch -f は隔離 worktree のガードが拒否するので使わない）: (a) 修正後の git rev-parse HEAD の値を <new> として字面で控える（シェル変数不可）。修正コミットが無く HEAD が取得時から動いていなければ先端更新は不要で、(e) へ進む。(b) git checkout --no-guess ${branch} を実行する（--no-guess は origin にだけある名前から新規ブランチを作らせないため）。git が already used by worktree 等で拒否したら、detached のまま pushed: false・commitFailed: true・summary に理由と <new> で返す。(c) git merge --ff-only <new> を実行する。(d) git rev-parse refs/heads/${branch} が <new> と一致するか確かめる。(e) (b) でブランチへ付けたら、(c)(d) の成否にかかわらず直ちに git checkout --detach <new> を実行し、git rev-parse --abbrev-ref HEAD が HEAD であることを確かめる。ff できない・一致しない・detach できない場合は pushed: false・commitFailed: true・summary に理由と <new>。`,
+        `   ブランチへ付いている区間は (b) から (e) の数コマンドだけにする。手順 1〜3 の出口（マージ解消不能・P0/P1 修正不能・テスト不通過）ではブランチへ付かず、detached のまま返す。`,
         `   レビュースレッドの resolve は行わない（push 前の Review ループ）。`,
       ]
   return [

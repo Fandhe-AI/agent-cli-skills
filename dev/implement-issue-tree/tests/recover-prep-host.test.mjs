@@ -11,6 +11,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { importDefinitions, runScript, BASE_ARGS, source } from './lib/stub-run.mjs'
+import { noNote } from './lib/state-project.mjs'
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 const m = await importDefinitions(['sha256Hex', 'canonicalJson'], 'recover-prep-host')
@@ -18,7 +19,7 @@ const m = await importDefinitions(['sha256Hex', 'canonicalJson'], 'recover-prep-
 const labels = (calls) => calls.map((c) => c.opts.label)
 
 function recoverRun(item, reply) {
-  const hashes = Object.fromEntries(Object.entries({ 2: item }).map(([k, v]) => [k, m.sha256Hex(m.canonicalJson(v))]))
+  const hashes = Object.fromEntries(Object.entries({ 2: item }).map(([k, v]) => [k, m.sha256Hex(m.canonicalJson(noNote(v)))]))
   const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
   return runScript({
     args: BASE_ARGS,

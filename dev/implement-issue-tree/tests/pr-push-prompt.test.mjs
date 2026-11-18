@@ -139,29 +139,20 @@ test('fixPrompt(pushAfterFix: true): push の status を pushed 判定へ結ぶ�
 test('fixPrompt(pushAfterFix: false): pr-push.sh を呼ばない（push 前の Review ループ。ローカル修正のみ）', () => {
   const text = fixPrompt(item, impl, { summary: 's', unresolvedComments: [] }, false, [])
   assert.doesNotMatch(text, /pr-push\.sh/)
-  // Issue #731: git branch -f は別 worktree が checkout 中だと拒否されるため update-ref で更新し、反映を確認する
-  assert.ok(!text.includes(`git update-ref refs/heads/${B} HEAD`), '旧値なしの update-ref は使わない')
-  // fix は隔離された worktree で動き、自分の worktree の外への git -C・cd をハーネスに拒否される。使用中 worktree を一緒に進める手順
-  // （git -C <path> status / merge --ff-only）を戻すと、実装 worktree がブランチを checkout 中のあいだ必ず commitFailed で終わる
-  const tipStart = text.indexOf('先端更新（')
-  const tip = text.slice(tipStart, text.indexOf('レビュースレッドの resolve は行わない'))
-  assert.ok(tipStart >= 0 && tip.length > 0, '先端更新の節が見つからない')
-  assert.doesNotMatch(tip, /git\s+-C\b|\bcd\s|<path>|merge --ff-only/, '先端更新は自分の worktree の外へ触る手順を持たない')
-  assert.ok(tip.includes('あれば中止（その worktree を含め、カレントの worktree の外には一切触れない'), '使用中 worktree があれば触らずに中止する')
-  assert.ok(text.includes(`git update-ref refs/heads/${B} <HEAD の sha> <old>`), '未使用なら旧値つき')
-  assert.ok(text.includes('detach 直後に git rev-parse HEAD の値を <old> として字面で控え'), '旧値は detach 直後の HEAD（ブランチ ref の読み直しは不可）')
-  assert.ok(text.includes('シェル変数不可'))
-  assert.ok(!text.includes(`git rev-parse refs/heads/${B} の値を <old>`))
-  assert.ok(text.includes(`git rev-parse refs/heads/${B} が <old> と違えば中止`))
-  assert.doesNotMatch(text, /\$old/)
-  assert.ok(!text.includes('old=$('))
-  assert.ok(!text.includes('ref≠'))
-  assert.ok(text.includes(`git rev-parse refs/heads/${B} が HEAD と不一致`))
-  // #751: 先端更新の照合失敗（中止）は条件不成立と同じ pushed: false・commitFailed: true で返す
-  const abortIdx = text.indexOf(`git rev-parse refs/heads/${B} が <old> と違えば中止`)
-  const failLine = `中止・条件不成立・失敗・git rev-parse refs/heads/${B} が HEAD と不一致なら pushed: false・commitFailed: true`
-  assert.ok(text.includes(failLine), '中止が commitFailed の返し方に結ばれていない')
-  assert.ok(abortIdx >= 0 && abortIdx < text.indexOf(failLine))
+  // Issue #878: 作業は detached HEAD。ブランチへ付くのは手順 4 の先端更新の数コマンドだけ（update-ref は隔離 worktree のガードが拒否する）
+  assert.doesNotMatch(text, /git update-ref を実行|<old>|git worktree list|名前指定。--detach は付けない/, 'update-ref・旧値の控え・worktree 走査を指示しない')
+  assert.ok(text.includes(`git checkout --detach ${B} で detached HEAD として取得し`), '手順 1 は detach 取得')
+  const step1 = text.slice(text.indexOf('1. '), text.indexOf('2. 指摘を重要度'))
+  assert.ok(!/git checkout (?!--detach)/.test(step1), '手順 1 に名前指定の checkout が無い')
+  const step4 = text.slice(text.indexOf('4. create-commit'), text.indexOf('レビュースレッドの resolve は行わない'))
+  assert.ok(step4.includes(`git checkout --no-guess ${B}`), '名前指定の checkout は --no-guess で手順 4 にある')
+  assert.ok(step4.includes('git merge --ff-only <new>'), 'ff-only で進める')
+  assert.ok(step4.includes(`git rev-parse refs/heads/${B} が <new> と一致するか確かめる`), '一致を確かめる')
+  assert.ok(step4.includes('git checkout --detach <new>') && step4.includes('git rev-parse --abbrev-ref HEAD が HEAD であることを確かめる'), '直ちに detach して HEAD を確かめる')
+  assert.ok(step4.includes('already used by worktree 等で拒否したら、detached のまま pushed: false・commitFailed: true'), '使用中は detached のまま commitFailed')
+  assert.ok(step4.includes('ブランチへ付いている区間は (b) から (e) の数コマンドだけ'), '付く区間を限定する')
+  // 名前指定の checkout（--detach でも --no-guess でもない）は本文のどこにも無い
+  assert.doesNotMatch(text.replace(/git checkout --(detach|no-guess)/g, ''), new RegExp(`git checkout ${B}`), '名前指定の素の checkout が無い')
   assert.match(text, /commitFailed: true/)
   assert.doesNotMatch(text, new RegExp(`git branch -f ${B}`))
 })

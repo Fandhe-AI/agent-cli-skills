@@ -66,7 +66,7 @@ function envelope(r) {
   return env
 }
 const itemsOf = (n, base = 100) => Object.fromEntries(Array.from({ length: n }, (_, i) => [String(base + i), { status: 'monitoring', pr: 1000 + i, note: '日本語 付き\t"q"', nested: { b: 1, a: [1, 2, { z: null, y: true }] } }]))
-const itemHash = (v) => sha(canonicalJsonJq(v))
+const itemHash = (v) => sha(canonicalJsonJq(typeof v === 'object' && v !== null && !Array.isArray(v) ? (({ note: _n, ...r }) => r)(v) : v))
 // jq -jcS の出力の期待値（キー昇順・空白なし）。DEL の出力は jq の版で違う（1.8 は \u007f へエスケープ）ため、DEL を含む項目は
 // 下の差分テスト（従来のコマンドとの比較）だけで確かめ、ここでは DEL を含まない値だけに使う
 function canonicalJsonJq(v) {
@@ -305,7 +305,7 @@ for (const bash of BASHES) {
 // ---- (3) 従来のインラインのコマンドとの差分 ----
 // P5 より前の state:load-verify プロンプトに埋め込まれていたコマンド（エージェントが書き写して実行していたもの）。
 // 項目のハッシュ・キーのダイジェスト・件数・高水位の計算式の正本として、そのまま持つ
-const OLD_COMMAND = `h() { sha256sum 2>/dev/null || shasum -a 256; }; if [ -f "$f" ]; then K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"; jq -c '[.perWorktreeByteReserveHighWater // 0, .perWorktreeByteReserveHighWaterVersion // 0]' "$f"; jq -r "$K | .[]" "$f" | sed -n "\${R:-1,\\$}p" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k]' "$f" | h | cut -c1-64)"; done; else echo NOFILE; fi`
+const OLD_COMMAND = `h() { sha256sum 2>/dev/null || shasum -a 256; }; if [ -f "$f" ]; then K='[.items // {} | keys[] | select(test("^[1-9][0-9]*$"))]'; echo "KEYS $(jq -jc "$K" "$f" | h | cut -c1-64) $(jq "$K | length" "$f")"; jq -c '[.perWorktreeByteReserveHighWater // 0, .perWorktreeByteReserveHighWaterVersion // 0]' "$f"; jq -r "$K | .[]" "$f" | sed -n "\${R:-1,\\$}p" | while IFS= read -r k; do printf '%s %s\\n' "$k" "$(jq -jcS --arg k "$k" '.items[$k] | if type == "object" then del(.note) else . end' "$f" | h | cut -c1-64)"; done; else echo NOFILE; fi`
 
 function oldResult(sb, bash) {
   const r = spawnSync(bash, ['-c', `f=${FILE}; ${OLD_COMMAND}`], { cwd: sb.root, encoding: 'utf8' })

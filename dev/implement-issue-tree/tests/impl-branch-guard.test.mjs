@@ -8,6 +8,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { importDefinitions, runScript, BASE_ARGS, source } from './lib/stub-run.mjs'
+import { noNote } from './lib/state-project.mjs'
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 const m = await importDefinitions(['implBranchViolation', 'implBranchViolationKind', 'sha256Hex', 'canonicalJson'], 'impl-branch-guard')
@@ -93,7 +94,7 @@ test('blocked は halt を数えない（違反が 3 イシュー連続しても
 
 const recoverRun = (implBranch, extra = {}) => {
   const item = { status: 'failed', branch: 'feat/2-x', worktree: '/repo/wt/old', pr: 77, ...extra }
-  const hashes = { 2: m.sha256Hex(m.canonicalJson(item)) }
+  const hashes = { 2: m.sha256Hex(m.canonicalJson(noNote(item))) }
   const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
   return runScript({
     args: BASE_ARGS,
@@ -149,7 +150,7 @@ test('回復経路: 違反で止まった結果の状態で次ランを回すと
 // 通常経路（Recover が discard で Plan へ戻る）。保存状態に branch / pr が残った状態（discard 後の planning 書き込みが反映されなかった場合を模す）
 const normalRun = (saved) => {
   const item = { status: 'failed', branch: 'feat/2-x', worktree: '/repo/wt/old', pr: 77, ...saved }
-  const hashes = { 2: m.sha256Hex(m.canonicalJson(item)) }
+  const hashes = { 2: m.sha256Hex(m.canonicalJson(noNote(item))) }
   const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
   return runScript({
     args: BASE_ARGS,
@@ -187,7 +188,7 @@ test('通常経路: 違反で止まった結果の状態で次ランを回して
 // レビューアの再現形: 保存状態は branch 空・worktree あり。Recover が worktree の HEAD（規約外の既定ブランチ名）を解決して返す。
 const nonconformingRun = (decision, extra = {}) => {
   const item = { status: 'failed', branch: '', worktree: '/repo/wt/old', pr: 0, ...extra.saved }
-  const hashes = { 2: m.sha256Hex(m.canonicalJson(item)) }
+  const hashes = { 2: m.sha256Hex(m.canonicalJson(noNote(item))) }
   const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
   return runScript({
     args: BASE_ARGS,
@@ -269,7 +270,7 @@ test('Recover continue が規約外 branch を解決: 継続せず blocked（hal
 test('Recover continue が規約外 branch を解決: 3 イシュー連続でも halt しない', async () => {
   const items = {}
   for (const n of [2, 3, 4]) items[n] = { status: 'failed', branch: '', worktree: `/repo/wt/old${n}`, pr: 0 }
-  const hashes = Object.fromEntries(Object.entries(items).map(([k, v]) => [k, m.sha256Hex(m.canonicalJson(v))]))
+  const hashes = Object.fromEntries(Object.entries(items).map(([k, v]) => [k, m.sha256Hex(m.canonicalJson(noNote(v)))]))
   const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
   const { result } = await runScript({
     args: BASE_ARGS,
@@ -327,7 +328,7 @@ const gone = { status: 'blocked', branch: '', worktree: '/repo/wt/old', pr: 0, n
 const goneRecover = { decision: 'discard', branch: '', worktreeMissing: true, wipCommitted: true, reason: 'no commits' }
 const goneRun = (saved, recover) => {
   const item = { ...gone, ...saved }
-  const hashes = { 2: m.sha256Hex(m.canonicalJson(item)) }
+  const hashes = { 2: m.sha256Hex(m.canonicalJson(noNote(item))) }
   const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
   return runScript({
     args: BASE_ARGS,

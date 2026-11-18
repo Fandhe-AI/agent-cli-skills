@@ -21,6 +21,7 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { SCRIPT_HASH_PLACEHOLDER_RE, bundleSha256 } from '../scripts/build-workflow.mjs'
 import { createAgentHost } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
 import { loadConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
+import { noNote } from './lib/state-project.mjs'
 
 const SKILL_DIR = fileURLToPath(new URL('../../../skills/implement-issue-tree', import.meta.url))
 const SCRIPTS_DIR = join(SKILL_DIR, 'scripts')
@@ -114,7 +115,7 @@ test('state:load: 40 桁の sha を複数含む長い note の項目を、モデ
   assert.deepEqual(r.seen.map((x) => x.label), ['state:load', 'state:load-verify'], '照合が一致するので state:load-fill は起きない')
   assert.equal(r.value.verified, true, h.logs.join('\n'))
   assert.deepEqual(r.value.unverified, [])
-  assert.deepEqual(r.value.items, JSON.parse(readFileSync(s.file, 'utf8')).items)
+  assert.deepEqual(r.value.items, Object.fromEntries(Object.entries(JSON.parse(readFileSync(s.file, 'utf8')).items).map(([k, v]) => [k, noNote(v)])), '採用した項目は note を持たない（Issue #878）')
   assert.deepEqual(r.value.keys.sort(), ['11', '12', '13'])
   assert.equal(r.value.highWaterBytes, 81920)
   assert.equal(r.value.highWaterVersion, 2)
@@ -134,7 +135,7 @@ test('state:load-fill: state:load の値が欠けた・写し損ねた項目を�
   assert.deepEqual(r.seen.filter((x) => x.host).map((x) => x.label), ['state:load-verify', 'state:load-fill'])
   assert.equal(r.value.verified, true, h.logs.join('\n'))
   assert.deepEqual(r.value.unverified, [])
-  assert.deepEqual(r.value.items, JSON.parse(readFileSync(s.file, 'utf8')).items)
+  assert.deepEqual(r.value.items, Object.fromEntries(Object.entries(JSON.parse(readFileSync(s.file, 'utf8')).items).map(([k, v]) => [k, noNote(v)])), '採用した項目は note を持たない（Issue #878）')
 })
 
 /** src が組む state:load-fill のプロンプト（前の test と同じ取り方。host は呼ばない）。 */

@@ -16,6 +16,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { importDefinitions, runScript, BASE_ARGS } from './lib/stub-run.mjs'
 import { makeEnvelope, parseRepoScanCommand, skipLabelsReply } from './lib/signed-output.mjs'
+import { noNote } from './lib/state-project.mjs'
 
 const D = await importDefinitions(
   ['parseSkipLabels', 'collectSkipLabelEntries', 'classifySkipLabels', 'skipLabelNote', 'skipLabelsPrompt', 'notifyBlockedPrompt', 'declaredDepsChecksum', 'estimateDispatch', 'sha256Hex', 'canonicalJson', 'repoScanInputSha256'],
@@ -525,7 +526,7 @@ test('notifyBlocked: ラン中に close された対象外ノードは待機中�
 // 葉 2 に保存済みの状態 saved があり、対象外ラベルが付いたランで、一括書き込みのプロンプトを集める。
 const withSaved = (saved, o = {}) => {
   const items = { 2: saved }
-  const hashes = { 2: D.sha256Hex(D.canonicalJson(saved)) }
+  const hashes = { 2: D.sha256Hex(D.canonicalJson(noNote(saved))) }
   const keysSha256 = D.sha256Hex(D.canonicalJson(['2']))
   const labels = ['owner:human', 'owner:joint']
   return runScript({

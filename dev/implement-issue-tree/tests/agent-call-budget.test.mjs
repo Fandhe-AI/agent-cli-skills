@@ -21,6 +21,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import { externalChecksReply, hashPrecheckReply, signedReply, skipLabelsReply, stateVerifyReply, wrapTreeReply } from './lib/signed-output.mjs'
 import { requestedNumbersOf } from './lib/declared-deps-prompt.mjs'
+import { noNote } from './lib/state-project.mjs'
 
 const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'implement-issue-tree.src.js')
 const DRIVER_MARKER = ['__IMPLEMENT', 'ISSUE', 'TREE', 'DRIVER', 'START__'].join('_')
@@ -175,7 +176,7 @@ function stateVerifyFor(items) {
   const keys = Object.keys(items).sort()
   return {
     fileExists: true,
-    hashes: Object.fromEntries(keys.map((k) => [k, sha256Hex(canonicalJson(items[k]))])),
+    hashes: Object.fromEntries(keys.map((k) => [k, sha256Hex(canonicalJson(noNote(items[k])))])),
     keysSha256: sha256Hex(canonicalJson(keys)),
     keysCount: keys.length,
     highWaterBytes: 0,
