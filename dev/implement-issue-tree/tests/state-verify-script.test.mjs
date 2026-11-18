@@ -127,7 +127,7 @@ for (const bash of BASHES) {
       const p = envelope(sb.verify(bash)).payload
       assert.equal(p.outcome, 'nofile')
       assert.equal(p.keysCount, 0)
-      assert.equal(p.keysSha256, '')
+      assert.equal(p.keysSha256, '-', '空文字は出さない（書き写しで落ちる）')
       assert.equal(p.pages, 1)
       assert.equal(existsSync(sb.abs('_/issue-trees')), withDir, 'ディレクトリを作らない・消さない')
       assert.deepEqual(readdirSync(sb.abs('tmp')), [], '一時ファイルを作らない')
@@ -155,7 +155,7 @@ for (const bash of BASHES) {
       assert.equal(p.outcome, 'error', state)
       assert.equal(p.keysCount, 0, state)
       assert.deepEqual(p.entries, [], state)
-      assert.equal(p.keysSha256, '', state)
+      assert.equal(p.keysSha256, '-', state)
     }
     const sb = sandbox()
     mkdirSync(sb.abs(FILE))
