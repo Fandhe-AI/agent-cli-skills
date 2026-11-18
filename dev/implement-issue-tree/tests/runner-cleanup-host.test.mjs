@@ -8,7 +8,7 @@
 //
 // ここでは src の updateStateDetailed が実際に組むプロンプトを使い（プロンプトの形への依存を固定する）、実 git のリポジトリと
 // 実物の run-verified.sh・worktree-remove.sh・state.sh で、ホストがモデルを介さずに 2 段を実行することを確かめる。
-import { test } from 'node:test'
+import { mock, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -18,6 +18,7 @@ import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { gitEnv, makeRepo } from './lib/worktree-sandbox.mjs'
 import { SCRIPT_HASH_PLACEHOLDER_RE, bundleSha256 } from '../scripts/build-workflow.mjs'
 import { createAgentHost, spawnScript } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
+import * as worktreeMod from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
 import { checkCleanupTarget, parseCleanupPrompt } from '../../../skills/implement-issue-tree/runner/lib/cleanup-host.mjs'
 import { loadConfig } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 
@@ -475,3 +476,70 @@ test('保険の時間切れ（watchdog）の後も、adapter.run が決着する
   assert.equal(existsSync(own), false)
 })
 const SWEEP_SCHEMA = { type: 'object', required: ['removed'], properties: { removed: { type: 'array', items: { type: 'string' } } } }
+
+// ---- 2 段の共有予算はキューの待ちを数えない（PR #881 の Bugbot・codex の指摘） ----
+
+// spawnScript を偽にして timeoutMs を記録する。偽の時計（Date だけ）は remove の実行中に advanceInRemove だけ進める
+function budgetHost(s, { advanceInRemove = 0, clock }) {
+  const mod = makeFakeAdapterModule({ reply: () => ({ ok: true, retained: false, branchSha: '', worktree: 'removed' }) })
+  const seen = []
+  const run = async (_file, argv, opts) => {
+    seen.push({ script: argv[2], timeoutMs: opts.timeoutMs })
+    if (argv[2] === 'worktree-remove.sh') {
+      clock.tick(advanceInRemove)
+      return { code: 0, stdout: 'WORKTREE_REMOVE_RESULT {"ok":true,"retained":false,"worktree":"removed"}\n', stderr: '', timedOut: false, overflow: false }
+    }
+    return { code: 0, stdout: 'STATE_RESULT {"ok":true}\n', stderr: '', timedOut: false, overflow: false }
+  }
+  const agent = createAgentHost({ adapter: mod.createAdapter({}), cfg: { config: loadConfig(), skillDir: SKILL_DIR, mainRoot: s.main, runId: RUN_ID, args: { parent: PARENT }, spawnScript: run } })
+  return { agent, seen }
+}
+
+test('掃除の予算: createWorktree 等のキューで長く待たされても、worktree-remove.sh には満額の予算が渡る', async () => {
+  const s = setup()
+  const { prompt, label } = await cleanupPromptOf(2, { status: 'merged', worktree: s.wt }, { cleanupWorktree: s.wt })
+  const clock = mock.timers
+  clock.enable({ apis: ['Date'], now: 1_000_000 })
+  try {
+    const quick = budgetHost(s, { clock })
+    await quick.agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+    const full = quick.seen[0].timeoutMs
+    assert.ok(full > 1, `前提: 満額の予算は 1 ms より大きい（${full}）`)
+    // 同じ mainRoot のキューを握らせ、待たされている間に偽の時計を予算の 10 倍進める
+    let release
+    const held = worktreeMod.runExclusive(s.main, () => new Promise((r) => { release = r }))
+    const h = budgetHost(s, { clock })
+    const pending = h.agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r))
+    assert.equal(h.seen.length, 0, '前提: キューの待ちで remove はまだ始まっていない')
+    clock.tick(full * 10)
+    release()
+    await held
+    const got = await pending
+    assert.equal(h.seen[0].script, 'worktree-remove.sh')
+    assert.equal(h.seen[0].timeoutMs, full, 'キューの待ちは予算を減らさない')
+    assert.equal(got.worktree, 'removed')
+  } finally {
+    clock.reset()
+  }
+})
+
+test('掃除の予算: 2 段で 1 つの予算。remove の実処理で使った分だけ state.sh の予算が減り、超えれば 1 ms になる', async () => {
+  const s = setup()
+  const { prompt, label } = await cleanupPromptOf(2, { status: 'merged', worktree: s.wt }, { cleanupWorktree: s.wt })
+  mock.timers.enable({ apis: ['Date'], now: 1_000_000 })
+  try {
+    const base = budgetHost(s, { clock: mock.timers })
+    await base.agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+    const full = base.seen[0].timeoutMs
+    assert.equal(base.seen[1].timeoutMs, full, '実処理の時間が 0 なら 2 段目も満額')
+    const used = budgetHost(s, { advanceInRemove: 1000, clock: mock.timers })
+    await used.agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+    assert.equal(used.seen[1].timeoutMs, full - 1000, 'remove が使った分だけ減る')
+    const over = budgetHost(s, { advanceInRemove: full + 5000, clock: mock.timers })
+    await over.agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+    assert.equal(over.seen[1].timeoutMs, 1, '予算を超えたら 2 段目は打ち切り同然の 1 ms')
+  } finally {
+    mock.timers.reset()
+  }
+})

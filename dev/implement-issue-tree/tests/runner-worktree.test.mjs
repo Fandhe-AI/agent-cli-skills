@@ -497,15 +497,18 @@ test('createWorktree: 1 件目の lock の失敗の片づけが終わるまで�
   assert.deepEqual(results.map((r) => r.status), ['rejected', 'fulfilled'], results.map((r) => r.reason?.message).join(' / '))
   assert.match(results[0].reason.message, /injected worktree lock failure/)
   const events = readFileSync(log, 'utf8').trim().split('\n')
-  assert.deepEqual(events, [
+  // どちらがキューに先に入るかは決まっていない（createWorktree は基点ブランチ名の検査〔非同期の git〕の後でキューに入るため、
+  // 呼び出し順と投入順は一致しない）。示したいのは「1 件目の add〜片づけと 2 件目の add〜lock が重ならない」ことだけ
+  const block1 = [
     '1 worktree-add start', '1 worktree-add end',
     '1 worktree-lock start', '1 worktree-lock end',
     '1 worktree-unlock start', '1 worktree-unlock end',
     '1 worktree-remove start', '1 worktree-remove end',
     '1 branch--D start', '1 branch--D end',
-    '2 worktree-add start', '2 worktree-add end',
-    '2 worktree-lock start', '2 worktree-lock end',
-  ], '1 件目の add〜片づけの後に 2 件目の add が始まる')
+  ]
+  const block2 = ['2 worktree-add start', '2 worktree-add end', '2 worktree-lock start', '2 worktree-lock end']
+  const expected = events[0]?.startsWith('1 ') ? [...block1, ...block2] : [...block2, ...block1]
+  assert.deepEqual(events, expected, '2 件の add〜片づけが重ならない（どちらが先でもよい）')
   assert.equal(existsSync(worktreeNames(sb.main, runId, 1).path), false)
   assert.ok(existsSync(results[1].value.path))
 })
@@ -734,4 +737,27 @@ test('createWorktree: add の前のパスの確認が ENOENT 以外のエラー�
     chmodSync(parent, 0o755)
   }
   assert.ok(!fake.calls().includes('add'), fake.calls().join(','))
+})
+test('runExclusive: createWorktree と同じキューで直列になる（remove 側が走っている間は add を始めない）。失敗しても後続を止めない', async () => {
+  const sb = sandbox()
+  const ref = sandbox()
+  const events = []
+  let release
+  const gate = new Promise((r) => { release = r })
+  // 掃除側（worktree-remove.sh の直接実行に相当）が gate を握っている間に、同じリポジトリの add を積む
+  const held = worktreeMod.runExclusive(sb.main, async () => { events.push('remove-start'); await gate; events.push('remove-end') })
+  const add = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, lock: false }).then((w) => { events.push('add-done'); return w })
+  // 別のリポジトリのキューは独立。実時間で待たず、別リポの add の完了（git の作業が一巡する時間）を基準にする
+  const other = await createWorktree({ mainRoot: ref.main, runId: newRunId(), n: 1, fetch: false, lock: false })
+  assert.ok(existsSync(other.path), '別リポジトリは待たされない')
+  assert.deepEqual(events, ['remove-start'], '同じリポジトリの add は remove の間は始まらない')
+  assert.ok(!existsSync(join(sb.main, '.claude', 'worktrees')), 'add のディレクトリ作成もまだ')
+  release()
+  const wt = await add
+  await held
+  assert.deepEqual(events, ['remove-start', 'remove-end', 'add-done'])
+  assert.ok(existsSync(wt.path))
+  // 失敗はそのまま投げ、後続は止めない
+  await assert.rejects(worktreeMod.runExclusive(sb.main, async () => { throw new Error('boom') }), /boom/)
+  assert.equal(await worktreeMod.runExclusive(sb.main, async () => 'next'), 'next')
 })

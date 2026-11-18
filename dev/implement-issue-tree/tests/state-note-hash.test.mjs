@@ -208,11 +208,11 @@ for (const bash of BASHES) {
     }
   })
 
-  test(`[${bash}] state.sh verify の n: note が無い・文字列でない・項目が文字列の項目は空文字。n は h に影響しない`, { skip: !jq }, () => {
+  test(`[${bash}] state.sh verify の n: note が無い・文字列でない・項目が文字列の項目は印の -（空文字は出さない）。n は h に影響しない`, { skip: !jq }, () => {
     const items = { 60: rest, 61: { ...rest, note: 5 }, 62: { ...rest, note: null }, 63: 'text', 64: { ...rest, note: ['x'] }, 65: makeItem('x') }
     const entries = stateShVerifyEntries(bash, items)
     const byK = Object.fromEntries(entries.map((e) => [e.k, e]))
-    for (const k of ['60', '61', '62', '63', '64']) assert.equal(byK[k].n, '', `項目 ${k}`)
+    for (const k of ['60', '61', '62', '63', '64']) assert.equal(byK[k].n, '-', `項目 ${k}`)
     assert.equal(byK[65].n, sha256Hex('x'))
     assert.equal(byK[60].h, sha256Hex(canonicalJson(rest)))
     assert.equal(byK[61].h, sha256Hex(canonicalJson(rest)), 'note が数値の項目も note を除いたハッシュ')
@@ -227,13 +227,18 @@ test('isValidStateVerifyEnvelope・mergeStateVerify: n は 64 桁 16 進か空�
   const env = (pl) => ({ nonce, payload: pl, sha256: sha256Hex(`${nonce}\n${canonicalJson(pl)}`) })
   const ok = (entries) => isValidStateVerifyEnvelope(env(payload(entries)), nonce, 0)
   assert.equal(ok([{ h: HEX, k: '1', n: HEX }]), true)
-  assert.equal(ok([{ h: HEX, k: '1', n: '' }]), true)
+  assert.equal(ok([{ h: HEX, k: '1', n: '-' }]), true, '印の - は note なし')
+  assert.equal(ok([{ h: HEX, k: '1', n: '' }]), false, '空文字は書き写しで落ちる欄なので封筒として受理しない')
+  assert.equal(ok([{ h: HEX, k: '1', n: '--' }]), false)
   assert.equal(ok([{ h: HEX, k: '1' }]), false, 'n が無い旧封筒')
   assert.equal(ok([{ h: HEX, k: '1', n: 'zz' }]), false)
   assert.equal(ok([{ h: HEX, k: '1', n: 'A'.repeat(64) }]), false, '大文字は不可')
   assert.equal(ok([{ h: HEX, k: '1', n: HEX + 'a' }]), false)
-  const merged = mergeStateVerify([payload([{ h: HEX, k: '1', n: HEX }, { h: HEX, k: '2', n: '' }])])
-  assert.deepEqual(merged.noteHashes, { 1: HEX, 2: '' })
+  const merged = mergeStateVerify([payload([{ h: HEX, k: '1', n: HEX }, { h: HEX, k: '2', n: '-' }])])
+  assert.deepEqual(merged.noteHashes, { 1: HEX, 2: '' }, '印は note なし（内部では空）。isUnchangedStatePatch は patch に note があれば変化あり')
+  assert.equal(isUnchangedStatePatch({ status: 'blocked' }, { status: 'blocked', note: 'x' }, merged.noteHashes[2]), false)
+  assert.equal(isUnchangedStatePatch({ status: 'blocked' }, { status: 'blocked' }, merged.noteHashes[2]), true)
+  assert.equal(mergeStateVerify([payload([{ h: HEX, k: '1', n: '' }])])?.noteHashes[1], '', '合成した空文字は受理されても note なし扱い')
 })
 
 test('verifyLoadedItems: note のハッシュは照合を通った項目にだけ付き、項目そのものには混ざらない（メモリ上だけの別表）', () => {
