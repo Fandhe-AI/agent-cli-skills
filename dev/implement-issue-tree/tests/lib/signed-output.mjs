@@ -146,7 +146,7 @@ export function stateVerifyReply(prompt, check, over = {}) {
   const page = Number(/--page (\d+)/.exec(String(prompt))?.[1] ?? 0)
   if (nonce === null || !file) throw new Error('プロンプトに state.sh verify のコマンドが無い')
   const keys = check.hashes && typeof check.hashes === 'object' ? Object.keys(check.hashes).sort() : []
-  const entries = keys.slice(page * STATE_VERIFY_PAGE, (page + 1) * STATE_VERIFY_PAGE).map((k) => ({ h: check.hashes[k], k }))
+  const entries = keys.slice(page * STATE_VERIFY_PAGE, (page + 1) * STATE_VERIFY_PAGE).map((k) => ({ h: check.hashes[k], k, n: check.noteHashes?.[k] ?? '' }))
   const base = { entries, highWaterBytes: check.highWaterBytes, highWaterVersion: check.highWaterVersion, inputSha256: inputSha256(`${file}\n${page}`), keysCount: check.keysCount, keysSha256: check.keysSha256, mode: 'verify', outcome: check.fileExists ? 'ok' : 'nofile', page, pages: Math.max(1, Math.ceil(keys.length / STATE_VERIFY_PAGE)) }
   return makeEnvelope(nonce, { ...base, ...over })
 }

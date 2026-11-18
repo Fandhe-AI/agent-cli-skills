@@ -30,8 +30,8 @@ const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 globalThis.args = { parent: 1, skillDir: '/skill' }
 const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-state-note-hash-')))
 const slicePath = join(sliceDir, 'defs.mjs')
-writeFileSync(slicePath, `${definitionPart}\nexport { sha256Hex, canonicalJson, verifyLoadedItems, projectStateItem, capStateText, capStatePatchText }\n`)
-const { sha256Hex, canonicalJson, verifyLoadedItems, projectStateItem, capStateText, capStatePatchText } = await import(slicePath)
+writeFileSync(slicePath, `${definitionPart}\nexport { sha256Hex, canonicalJson, verifyLoadedItems, projectStateItem, capStateText, capStatePatchText, mergeStateVerify, isValidStateVerifyEnvelope, isUnchangedStatePatch }\n`)
+const { sha256Hex, canonicalJson, verifyLoadedItems, projectStateItem, capStateText, capStatePatchText, mergeStateVerify, isValidStateVerifyEnvelope, isUnchangedStatePatch } = await import(slicePath)
 
 // merge-exec・fix の要約に似た約 590 文字の note（句読点・括弧・#123・バッククォート・全角記号・引用符・バックスラッシュ・絵文字を含む）
 const LONG_NOTE =
@@ -52,6 +52,10 @@ const BASHES = availableBashes()
 const jq = toolExists('jq')
 
 function stateShVerify(bash, items) {
+  return Object.fromEntries(stateShVerifyEntries(bash, items).map((e) => [e.k, e.h]))
+}
+
+function stateShVerifyEntries(bash, items) {
   const root = trackTmp(mkdtempSync(join(tmpdir(), 'iit-state-note-sb-')))
   mkdirSync(join(root, '_', 'issue-trees'), { recursive: true })
   mkdirSync(join(root, 'tmp'))
@@ -61,7 +65,7 @@ function stateShVerify(bash, items) {
   })
   assert.equal(r.status, 0, r.stderr)
   const env = JSON.parse(r.stdout.trim())
-  return Object.fromEntries(env.payload.entries.map((e) => [e.k, e.h]))
+  return env.payload.entries
 }
 
 test('前提: テストの note は 550〜650 文字', () => {
@@ -179,4 +183,70 @@ test('capStatePatchText: 3 欄だけを切り、ほかの欄・件数・threadId
 test('updateStateDetailed の書き込み patch は capStatePatchText を通る（mergePatch の唯一の生成点）', () => {
   assert.match(source, /const mergePatch = capStatePatchText\(/)
   assert.equal((source.match(/patch: mergePatch/g) ?? []).length, 1)
+})
+
+// 第 4 群: 封筒の n（保存済みの note の sha256）。blocked の一括記録が「保存済みと同じ note」かを、note を読み込まずに判定するために使う
+// （isUnchangedStatePatch。Issue #878 の副作用の是正）。
+const NOTE_CASES = {
+  長い日本語: LONG_NOTE,
+  絵文字と結合文字: '🚀 が（が） 👨‍👩‍👧 🇯🇵',
+  改行: '一行目\n二行目\r\n三行目',
+  末尾の改行: '末尾に改行\n',
+  DEL: 'a\u007fb\u007f',
+  '引用符とバックスラッシュ': '"q" \\ \\n \'s\' <t> &',
+  空文字: '',
+}
+
+for (const bash of BASHES) {
+  test(`[${bash}] state.sh verify の n は note の生のバイト列の sha256 で、ホストの sha256Hex と一致する（長い日本語・絵文字・改行・DEL）`, { skip: !jq }, () => {
+    const items = Object.fromEntries(Object.values(NOTE_CASES).map((note, i) => [String(50 + i), makeItem(note)]))
+    const entries = stateShVerifyEntries(bash, items)
+    assert.equal(entries.length, Object.keys(NOTE_CASES).length)
+    for (const [i, note] of Object.values(NOTE_CASES).entries()) {
+      const e = entries.find((x) => x.k === String(50 + i))
+      assert.equal(e.n, note === '' ? sha256Hex('') : sha256Hex(note), `note ${JSON.stringify(note).slice(0, 20)}`)
+    }
+  })
+
+  test(`[${bash}] state.sh verify の n: note が無い・文字列でない・項目が文字列の項目は空文字。n は h に影響しない`, { skip: !jq }, () => {
+    const items = { 60: rest, 61: { ...rest, note: 5 }, 62: { ...rest, note: null }, 63: 'text', 64: { ...rest, note: ['x'] }, 65: makeItem('x') }
+    const entries = stateShVerifyEntries(bash, items)
+    const byK = Object.fromEntries(entries.map((e) => [e.k, e]))
+    for (const k of ['60', '61', '62', '63', '64']) assert.equal(byK[k].n, '', `項目 ${k}`)
+    assert.equal(byK[65].n, sha256Hex('x'))
+    assert.equal(byK[60].h, sha256Hex(canonicalJson(rest)))
+    assert.equal(byK[61].h, sha256Hex(canonicalJson(rest)), 'note が数値の項目も note を除いたハッシュ')
+    assert.equal(byK[63].h, sha256Hex('text'), '項目が文字列の従来の扱いは変わらない')
+  })
+}
+
+const HEX = 'a'.repeat(64)
+test('isValidStateVerifyEnvelope・mergeStateVerify: n は 64 桁 16 進か空文字だけ。n が無い・不正な封筒は受理しない', () => {
+  const nonce = 'abc123nonce'
+  const payload = (entries) => ({ entries, highWaterBytes: 0, highWaterVersion: 0, inputSha256: sha256Hex(`${FILE}\n0`), keysCount: entries.length, keysSha256: HEX, mode: 'verify', outcome: 'ok', page: 0, pages: 1 })
+  const env = (pl) => ({ nonce, payload: pl, sha256: sha256Hex(`${nonce}\n${canonicalJson(pl)}`) })
+  const ok = (entries) => isValidStateVerifyEnvelope(env(payload(entries)), nonce, 0)
+  assert.equal(ok([{ h: HEX, k: '1', n: HEX }]), true)
+  assert.equal(ok([{ h: HEX, k: '1', n: '' }]), true)
+  assert.equal(ok([{ h: HEX, k: '1' }]), false, 'n が無い旧封筒')
+  assert.equal(ok([{ h: HEX, k: '1', n: 'zz' }]), false)
+  assert.equal(ok([{ h: HEX, k: '1', n: 'A'.repeat(64) }]), false, '大文字は不可')
+  assert.equal(ok([{ h: HEX, k: '1', n: HEX + 'a' }]), false)
+  const merged = mergeStateVerify([payload([{ h: HEX, k: '1', n: HEX }, { h: HEX, k: '2', n: '' }])])
+  assert.deepEqual(merged.noteHashes, { 1: HEX, 2: '' })
+})
+
+test('verifyLoadedItems: note のハッシュは照合を通った項目にだけ付き、項目そのものには混ざらない（メモリ上だけの別表）', () => {
+  const items = { 43: makeItem(LONG_NOTE), 44: makeItem('短い') }
+  const hashes = { 43: sha256Hex(canonicalJson(projectStateItem(items[43]))), 44: sha256Hex(canonicalJson(projectStateItem(items[44]))) }
+  const noteHashes = { 43: sha256Hex(LONG_NOTE), 44: sha256Hex('短い') }
+  const r = verifyLoadedItems({ 43: projectStateItem(items[43]), 44: { ...projectStateItem(items[44]), pr: 999 } }, { fileExists: true, hashes, noteHashes })
+  assert.deepEqual(Object.keys(r.adoptedNoteHashes), ['43'], '不一致で落ちた 44 のハッシュは付けない')
+  assert.equal(r.adoptedNoteHashes[43], sha256Hex(LONG_NOTE))
+  assert.deepEqual(r.adopted[43], projectStateItem(items[43]), '採用した項目は note もハッシュも持たない')
+  assert.ok(!JSON.stringify(r.adopted).includes(noteHashes[43]), '項目にハッシュが混ざらない（updateState の patch に載らない）')
+  // noteHashes の無い照合入力（旧形式）でも落ちず、ハッシュなし = 書き直しに倒れる
+  const old = verifyLoadedItems({ 43: projectStateItem(items[43]) }, { fileExists: true, hashes: { 43: hashes[43] } })
+  assert.deepEqual(old.adoptedNoteHashes, {})
+  assert.equal(isUnchangedStatePatch(old.adopted[43], { note: LONG_NOTE }, old.adoptedNoteHashes[43]), false)
 })

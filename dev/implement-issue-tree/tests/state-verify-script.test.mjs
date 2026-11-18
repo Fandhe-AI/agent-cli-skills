@@ -344,7 +344,8 @@ for (const bash of BASHES) {
       assert.equal(n.keysSha256, o.keysSha256, `${name}: keysSha256`)
       assert.equal(n.keysCount, o.keysCount, `${name}: keysCount`)
       assert.deepEqual(n.hw, o.hw, `${name}: 高水位`)
-      assert.deepEqual(n.entries, o.entries, `${name}: 項目ごとのハッシュ`)
+      // n（note のハッシュ。Issue #878 の追加）は従来のコマンドに無いので、h・k だけを比べる
+      assert.deepEqual(n.entries.map(({ h, k }) => ({ h, k })), o.entries, `${name}: 項目ごとのハッシュ`)
     }
   })
 
