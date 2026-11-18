@@ -727,6 +727,25 @@ return s.length>b?`${s.slice(0, b)}（省略）`:s
 }
 
 
+const av=300
+const v4=200
+function qb(v,a=av){
+if(!we(v))return v
+const b=Array.from(v)
+return b.length>a?`${b.slice(0, a - 4).join('')}（省略）`:v
+}
+function Mc(a){
+const b={ ...a}
+if(we(b.lastUnresolvedInfo))b.lastUnresolvedInfo=qb(b.lastUnresolvedInfo)
+if(Array.isArray(b.outOfScopeLog))b.outOfScopeLog=b.outOfScopeLog.map((v)=>qb(v))
+if(Array.isArray(b.lastUnresolvedComments)){
+b.lastUnresolvedComments=b.lastUnresolvedComments.map((c)=>
+c&&typeof c==='object'&& !Array.isArray(c)?{ ...c,text:qb(c.text,v4)}:c)
+}
+return b
+}
+
+
 
 let kE=''
 
@@ -3196,7 +3215,7 @@ const o=Boolean(f||k)
 if(f&&l==='discard')kX.add(f)
 
 const p=l==='discard'&&Boolean(f)&&h&&g===''
-const q=p?Object.fromEntries(Object.entries(b).filter(([k])=>k!=='worktree')):b
+const q=Mc(p?Object.fromEntries(Object.entries(b).filter(([k])=>k!=='worktree')):b)
 
 
 const r=o
@@ -3645,19 +3664,19 @@ return''
 
 
 const aG={
-'measure-residual-bytes.sh':'cd7548209b28c6a08d2729c40db7f95db80bcba9dd6e2203c493d8b05427f76d',
-'measure-free-disk.sh':'0b8e67159ad0ddfd7a6baf6e1f65c218b113d1e5bea802eae758c1413fd24d6b',
-'observe-pr.sh':'283844210db6aeb03235b48356394ad1899e874fa937786637a4f89f1f1f9796',
-'base-merge.sh':'518bbd61b12468bba040fff57d98875ae0836286f9e0007582e8b86695c8b166',
-'pr-push.sh':'8bd9627b9369eb835bf68f5bcac411b177545c8ce46767369227c16c94667430',
-'reply-resolve.sh':'4803620ac88c7d8f5f47d276cec4eef020473e8b221fb088713e42d9e90cf14b',
-'state.sh':'13970e7940fd99ff60891e919be9a2e580e3afdef22883b28cc2f5c29d57f650',
-'merge-gate.sh':'23266a588b5b106f0e42c102c6459d2a325cd2e32e4cc49d6dc9216cc994b73c',
-'worktree-remove.sh':'359ca2da277c5739427c468d9eab5257ec170acdc99333b9ff13a6618e520c3f',
-'recover-prep.sh':'41ef6623142eebea103b68af1fdeb1fd18efbb7336044e18c39b92b984909f8f',
-'fetch-tree.sh':'f0916aa4a200aa403c041e3bb1f22c4353611eb8225c6c6f9e4bb3a0515441e8',
-'declared-deps.sh':'969a97b170dd12737a95c35d49f547e324dcb9bbd4b8f215194e48edf9077161',
-'repo-scan.sh':'212f47b8874e652e6462162f01ead69f27620931f6b0a3ba4072fad9df950bba',
+'measure-residual-bytes.sh':'4c837a7c76b848a3d9886bcefcd07e34b3bfa4c3a6d42368ccc8135e1d81955c',
+'measure-free-disk.sh':'a0777e3750808e6d5f3c85bca776cd146c73ac2814acae68d0c9a647a9b7d190',
+'observe-pr.sh':'4a6a871c8a8a6c4ca45ccc10b2dbe96a90b0c1106361573dc12292a67b503f19',
+'base-merge.sh':'4a7b503e25ef16800a682af6c2f405b8d32c3c7dab1d854127552314b229a119',
+'pr-push.sh':'0be60b7250e99462da14340dcb0d380cae0e1ec100d17e6c64f88e647ee16dd1',
+'reply-resolve.sh':'43a8153e9a2d0d21a1337ac32cd3b65b6b2aa9de46250d19713568f0a518350b',
+'state.sh':'a669f59716198fd3a0fabfabb6855fb3726c122ad4c0368953d977d0c49b128d',
+'merge-gate.sh':'2f6aaeb2d3c9d5e0b68ad6d697a7dc70c091dedb32603879bf64a01ffa40f0f0',
+'worktree-remove.sh':'d86c40ec681c57f1afb56175963d158170397c7342a340a05ab7aaa6f25d40a0',
+'recover-prep.sh':'7104c65ace872bbfde9eb9b6fbc5618aacff3c11665fd9e8ab54cb8d49fd17da',
+'fetch-tree.sh':'8bbc832207c82a0ca6d20f3c96b189fd7500080ce2ad32f99d3d45b074cc8aa1',
+'declared-deps.sh':'475458198b0115085286d53f8381e357e52518bd78f54d537e4d7e585040e5cb',
+'repo-scan.sh':'90bff059f2a59fba9e4b61c1aaa800104cf7c725eb13d7d1150318936c1a18ef',
 }
 
 

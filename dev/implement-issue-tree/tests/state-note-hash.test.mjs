@@ -30,8 +30,8 @@ const definitionPart = source.slice(0, source.lastIndexOf('\n', markerIndex))
 globalThis.args = { parent: 1, skillDir: '/skill' }
 const sliceDir = trackTmp(mkdtempSync(join(tmpdir(), 'iit-state-note-hash-')))
 const slicePath = join(sliceDir, 'defs.mjs')
-writeFileSync(slicePath, `${definitionPart}\nexport { sha256Hex, canonicalJson, verifyLoadedItems, projectStateItem }\n`)
-const { sha256Hex, canonicalJson, verifyLoadedItems, projectStateItem } = await import(slicePath)
+writeFileSync(slicePath, `${definitionPart}\nexport { sha256Hex, canonicalJson, verifyLoadedItems, projectStateItem, capStateText, capStatePatchText }\n`)
+const { sha256Hex, canonicalJson, verifyLoadedItems, projectStateItem, capStateText, capStatePatchText } = await import(slicePath)
 
 // merge-exec・fix の要約に似た約 590 文字の note（句読点・括弧・#123・バッククォート・全角記号・引用符・バックスラッシュ・絵文字を含む）
 const LONG_NOTE =
@@ -138,3 +138,45 @@ for (const bash of BASHES) {
     assert.equal(after.fixCount, 3)
   })
 }
+
+// 第 3 群: note 以外の自由文（lastUnresolvedInfo・outOfScopeLog・lastUnresolvedComments）。再開時に復元して使うので射影からは外さず、
+// 状態ファイルへ書くときに短い上限（文字単位）へ切る。
+test('capStateText: 上限以内は変えず、超えたら接尾辞込みで上限ちょうどに切る。文字単位でサロゲートペアを割らず、再適用しても変わらない', () => {
+  assert.equal(capStateText('短い'), '短い')
+  const long = 'あ'.repeat(1000)
+  const c = capStateText(long)
+  assert.equal(Array.from(c).length, 300)
+  assert.ok(c.endsWith('（省略）'))
+  assert.equal(capStateText(c), c, '冪等')
+  const emoji = '🚀'.repeat(400)
+  const e = capStateText(emoji)
+  assert.equal(Array.from(e).length, 300)
+  assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(e), '孤立したサロゲートが無い')
+  assert.equal(capStateText(123), 123, '文字列以外は触らない')
+})
+
+test('capStatePatchText: 3 欄だけを切り、ほかの欄・件数・threadId・url は変えない。元の patch を書き換えない', () => {
+  const patch = {
+    status: 'failed', pr: 7, note: 'n'.repeat(900),
+    lastUnresolvedInfo: 'x'.repeat(2000),
+    outOfScopeLog: ['y'.repeat(450), '（他 3 件省略）'],
+    lastUnresolvedComments: [{ threadId: 'PRRT_a', text: 'z'.repeat(300), url: 'https://github.com/o/r/pull/7#x' }],
+  }
+  const before = JSON.stringify(patch)
+  const out = capStatePatchText(patch)
+  assert.equal(JSON.stringify(patch), before, '入力は不変')
+  assert.equal(Array.from(out.lastUnresolvedInfo).length, 300)
+  assert.equal(Array.from(out.outOfScopeLog[0]).length, 300)
+  assert.equal(out.outOfScopeLog[1], '（他 3 件省略）')
+  assert.equal(Array.from(out.lastUnresolvedComments[0].text).length, 200)
+  assert.equal(out.lastUnresolvedComments[0].threadId, 'PRRT_a')
+  assert.equal(out.lastUnresolvedComments[0].url, 'https://github.com/o/r/pull/7#x')
+  assert.equal(out.note, patch.note, 'note はここでは触らない（別途射影から外している）')
+  assert.equal(out.status, 'failed')
+  assert.deepEqual(capStatePatchText({ status: 'x' }), { status: 'x' }, '3 欄が無い patch はそのまま')
+})
+
+test('updateStateDetailed の書き込み patch は capStatePatchText を通る（mergePatch の唯一の生成点）', () => {
+  assert.match(source, /const mergePatch = capStatePatchText\(/)
+  assert.equal((source.match(/patch: mergePatch/g) ?? []).length, 1)
+})

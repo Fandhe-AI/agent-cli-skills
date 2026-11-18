@@ -726,6 +726,25 @@ function capText(str, max = 2000) {
   return s.length > max ? `${s.slice(0, max)}（省略）` : s
 }
 
+// 状態ファイルへ書く自由文の上限（Issue #878 追記）。lastUnresolvedInfo・outOfScopeLog の各行・lastUnresolvedComments の text は、再開時に復元して issue 化候補の記録や最終 note に使う（表示専用ではなく、射影から外すと再開で記録が失われ次の書き込みで空に上書きされる）一方、状態の読込・照合では読込エージェントが全文を書き写すため、長いと書き写し違いで項目ごと state-unverified になる。書くときに短い上限へ切る。文字単位（コードポイント）で切り、サロゲートペアを割らない。上限は接尾辞（省略）込みで、すでに上限以内の値は変えない（再書き込みで冪等）。上限を入れる前に書かれた長い値は、書き直されるまでそのまま残る。
+const STATE_TEXT_MAX = 300
+const STATE_COMMENT_TEXT_MAX = 200
+function capStateText(v, max = STATE_TEXT_MAX) {
+  if (!isStr(v)) return v
+  const cps = Array.from(v)
+  return cps.length > max ? `${cps.slice(0, max - 4).join('')}（省略）` : v
+}
+function capStatePatchText(patch) {
+  const out = { ...patch }
+  if (isStr(out.lastUnresolvedInfo)) out.lastUnresolvedInfo = capStateText(out.lastUnresolvedInfo)
+  if (Array.isArray(out.outOfScopeLog)) out.outOfScopeLog = out.outOfScopeLog.map((v) => capStateText(v))
+  if (Array.isArray(out.lastUnresolvedComments)) {
+    out.lastUnresolvedComments = out.lastUnresolvedComments.map((c) =>
+      c && typeof c === 'object' && !Array.isArray(c) ? { ...c, text: capStateText(c.text, STATE_COMMENT_TEXT_MAX) } : c)
+  }
+  return out
+}
+
 // 未信頼データ埋め込み用のデータ境界マーカートークン。固定文字列だと境界偽装できるため呼び出しごとに予測不能な値にする。Workflow harness は乱数・時刻 API を提供しないため、 /dev/urandom 由来の seed（ランごとに seed エージェントで取得し、ラン間では永続化しない）を内容に混ぜて導出する。トークンは seed と内容だけで決まるので、seed エージェントの結果が再生される resume でのみ同じトークンが再現する（新規ランは別の seed になる）。注意: 内容が同じ呼び出しは同じトークンに
 // なる。呼び出しごとに一意であるべき用途（測定スクリプトの nonce など）は、呼び出し連番を内容に含めること。
 let boundaryNonceSeed = ''
@@ -3196,7 +3215,7 @@ async function updateStateDetailed(issueNumber, patch, options = {}) {
   if (cleanupWorktreePath && cleanupMode === 'discard') sweepHeldPaths.add(cleanupWorktreePath)
   // discard で .worktree を空にする patch は、JSON マージには含めず、掃除エージェントの手順 2 に任せる（worktree が無くなったときだけ空にする）。先に空にすると、保持したときに状態ファイルから worktree の記録が消え、failed の書き戻しが失敗した場合に最終スイープの保持対象から外れる
   const deferWorktreeClear = cleanupMode === 'discard' && Boolean(cleanupWorktreePath) && clearWorktreeAfterCleanup && patchWorktree === ''
-  const mergePatch = deferWorktreeClear ? Object.fromEntries(Object.entries(patch).filter(([k]) => k !== 'worktree')) : patch
+  const mergePatch = capStatePatchText(deferWorktreeClear ? Object.fromEntries(Object.entries(patch).filter(([k]) => k !== 'worktree')) : patch)
 
   // 掃除担当エージェントのプロンプト。受け取る値は sanitizeWorktreePath / isValidBranchName で検証済みのパス・ブランチ名と固定文字列のみで、未信頼由来の自由文（patchJson）は含まない。.worktree のクリア（手順 2）は、削除対象が追跡中の worktree そのものの場合に限り、 worktree が無くなったときだけ行う（保持した worktree の記録は消さない）
   const cleanupPromptText = hasCleanup
