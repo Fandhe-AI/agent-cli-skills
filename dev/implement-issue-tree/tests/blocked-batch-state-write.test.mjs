@@ -110,15 +110,22 @@ test('formatIssueList: 5 件以下は従来の "#a, #b" 形式のまま、6 件�
 })
 
 test('isUnchangedStatePatch: patch の全キーが保存済みと一致するときだけ true（未保存・キー欠落・値差は false）', () => {
-  const saved = { type: 'implement', status: 'blocked', note: 'n', pr: 0, branch: '' }
-  assert.equal(isUnchangedStatePatch(saved, BLOCKED), true)
-  assert.equal(isUnchangedStatePatch(undefined, BLOCKED), false, '読めていない項目は省略せず書く')
-  assert.equal(isUnchangedStatePatch({ ...saved, note: 'other' }, BLOCKED), false)
-  // 読み込んだ項目は note を持たない（Issue #878）ので、note を持つ patch は変化ありとして書く（note だけの差を取りこぼさない）
-  assert.equal(isUnchangedStatePatch({ type: 'implement', status: 'blocked', pr: 0, branch: '' }, BLOCKED), false)
-  assert.equal(isUnchangedStatePatch({ ...saved, pr: 42 }, BLOCKED), false, 'pr をクリアする必要がある項目は書く')
-  assert.equal(isUnchangedStatePatch({ status: 'blocked', note: 'n' }, BLOCKED), false, 'pr キーが無ければ書く')
-  assert.equal(isUnchangedStatePatch(saved, { status: 'blocked', note: 'n' }), true, 'pr を触らない patch は pr を比較しない')
+  // 読み込んだ項目は note を持たない（Issue #878）。note は封筒の n（保存済みの note の sha256）と sha256(patch.note) の一致で比べる
+  const saved = { type: 'implement', status: 'blocked', pr: 0, branch: '' }
+  const nh = sha256Hex('n')
+  assert.equal(isUnchangedStatePatch(saved, BLOCKED, nh), true)
+  assert.equal(isUnchangedStatePatch(undefined, BLOCKED, nh), false, '読めていない項目は省略せず書く')
+  assert.equal(isUnchangedStatePatch(saved, BLOCKED, sha256Hex('other')), false, 'note が変わった項目は書く')
+  assert.equal(isUnchangedStatePatch(saved, BLOCKED, undefined), false, 'ハッシュが無い（照合されていない・旧封筒）ときは書く（fail-closed）')
+  assert.equal(isUnchangedStatePatch(saved, BLOCKED, ''), false, '保存済みに note が無い（n が空）ときは書く')
+  assert.equal(isUnchangedStatePatch(saved, BLOCKED, 'XYZ'), false, '形の不正なハッシュは一致にしない')
+  assert.equal(isUnchangedStatePatch({ ...saved, pr: 42 }, BLOCKED, nh), false, 'pr をクリアする必要がある項目は書く')
+  assert.equal(isUnchangedStatePatch({ status: 'blocked' }, BLOCKED, nh), false, 'pr キーが無ければ書く')
+  assert.equal(isUnchangedStatePatch(saved, { status: 'blocked', note: 'n' }, nh), true, 'pr を触らない patch は pr を比較しない')
+  assert.equal(isUnchangedStatePatch(saved, { status: 'blocked' }, undefined), true, 'note を書かない patch は note のハッシュを要らない')
+  assert.equal(isUnchangedStatePatch(saved, { status: 'blocked', note: 7 }, nh), false, '文字列でない note は一致にしない')
+  const long = '長い note 🚀\n\u007f'.repeat(80)
+  assert.equal(isUnchangedStatePatch(saved, { status: 'blocked', note: long }, sha256Hex(long)), true, '長い日本語・絵文字・改行・DEL')
 })
 
 // ---------------------------------------------------------------------------
@@ -155,15 +162,17 @@ test('writeBlockedStateBatch: チャンクは直列に流れる（同時に 2 �
 })
 
 test('writeBlockedStateBatch: 保存済みと同じ（blocked・同じ note・pr 0）の項目は書き込み対象から外す', async () => {
-  const saved = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [String(i + 1), { status: 'blocked', note: 'n', pr: 0 }]))
+  // 読み込んだ項目に note は無い（Issue #878）。note のハッシュは別の表（loadState の noteHashes）で渡す
+  const saved = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [String(i + 1), { status: 'blocked', pr: 0 }]))
+  const noteHashes = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [String(i + 1), sha256Hex('n')]))
   const { calls } = installAgentStub(() => ({ ok: true }))
-  const none = await writeBlockedStateBatch(entriesOf(1, 50, BLOCKED), saved)
+  const none = await writeBlockedStateBatch(entriesOf(1, 50, BLOCKED), saved, noteHashes)
   assert.equal(calls.length, 0, '全件が同一なら書き込みエージェントを起動しない')
   assert.equal(none.unchanged, 50)
   assert.equal(none.attempted, 0)
   assert.equal(none.requested, 50)
 
-  const half = await writeBlockedStateBatch(entriesOf(1, 80, BLOCKED), saved)
+  const half = await writeBlockedStateBatch(entriesOf(1, 80, BLOCKED), saved, noteHashes)
   assert.equal(calls.length, 1)
   assert.equal(half.unchanged, 50)
   assert.equal(half.attempted, 30)
@@ -320,6 +329,7 @@ function stateVerifyFor(items) {
   return {
     fileExists: true,
     hashes: Object.fromEntries(keys.map((k) => [k, sha256Hex(canonicalJson(noNote(items[k])))])),
+    noteHashes: Object.fromEntries(keys.map((k) => [k, typeof items[k]?.note === 'string' ? sha256Hex(items[k].note) : ''])),
     keysSha256: sha256Hex(canonicalJson(keys)),
     keysCount: keys.length,
     highWaterBytes: 0,
@@ -402,7 +412,7 @@ test('結合: ツリー外前提待ちのノードが N 件でも、blocked 記�
   }
 })
 
-test('結合: 再実行では、保存済みの note を読み込まないので blocked の patch は書き直される（note の差を取りこぼさない。Issue #878）', async () => {
+test('結合: 同じ引数で再実行しても、保存済みと同じ blocked・note のノードには書き込みエージェントが起動しない（Issue #878 の副作用の是正）', async () => {
   const nodes = leafNodes(30)
   const first = await runScript({ args: { parent: 1 }, nodes })
   const patches = patchesFromBatchCalls(first.calls)
@@ -410,13 +420,34 @@ test('結合: 再実行では、保存済みの note を読み込まないので
   const saved = Object.fromEntries(
     Object.entries(patches).map(([n, p]) => [n, { type: 'implement', status: 'pending', pr: 0, branch: '', worktree: '', fixCount: 0, ...p }]),
   )
-  // loadState は note を除いた項目を返す（読込側・検証側・ホストの射影）ので、note を持つ patch は常に「変化あり」になる
   const second = await runScript({ args: { parent: 1 }, nodes, saved })
+  assert.equal(batchCalls(second.calls).length, 0, '変化が無ければ書かない（loadState は note を読み込まないが、封筒の n で比べる）')
   assert.equal(second.result.blockedStateWrite.requested, 31)
+  assert.equal(second.result.blockedStateWrite.unchanged, 31)
+  assert.equal(second.result.blockedStateWrite.written, 0)
+  assert.equal(second.result.done.filter((d) => d.status === 'blocked').length, 31, '報告（results）は書き込みの有無によらず全件')
+
+  // 一部だけ note が違えばその分だけ書く
+  const drifted = { ...saved, 5: { ...saved[5], note: '古い note' } }
+  const third = await runScript({ args: { parent: 1 }, nodes, saved: drifted })
+  assert.equal(batchCalls(third.calls).length, 1)
+  assert.deepEqual(Object.keys(patchesFromBatchCalls(third.calls)), ['5'])
+  // 書く patch に note のハッシュ（メモリ上だけの別表）は混ざらない
+  assert.deepEqual(patchesFromBatchCalls(third.calls)[5], patches[5])
+  assert.ok(!JSON.stringify(batchCalls(third.calls).map((c) => c.prompt)).includes('noteHash'))
+})
+
+test('結合: 封筒の n が空（保存済みに note が無い・旧封筒と同じ見え方）のときは fail-closed に書き直す', async () => {
+  const nodes = leafNodes(30)
+  const first = await runScript({ args: { parent: 1 }, nodes })
+  const patches = patchesFromBatchCalls(first.calls)
+  const saved = Object.fromEntries(
+    Object.entries(patches).map(([n, p]) => [n, { type: 'implement', status: 'pending', pr: 0, branch: '', worktree: '', fixCount: 0, ...p }]),
+  )
+  const noNotes = Object.fromEntries(Object.entries(saved).map(([n, v]) => [n, noNote(v)]))
+  const second = await runScript({ args: { parent: 1 }, nodes, saved: noNotes })
   assert.equal(second.result.blockedStateWrite.unchanged, 0)
   assert.equal(second.result.blockedStateWrite.written, 31)
-  assert.equal(second.result.done.filter((d) => d.status === 'blocked').length, 31, '報告（results）は全件')
-  assert.deepEqual(patchesFromBatchCalls(second.calls), patches, '書く内容は 1 回目と同じ')
 })
 
 test('結合: 途中のチャンクが失敗すると、返却値とログから件数のずれが分かる', async () => {
@@ -552,7 +583,7 @@ test('配線: 一括書き込みは終了時の孤立 worktree 判定（loadStat
   assert.equal(calls.length, 1)
   const reload = driverPart.indexOf('const fresh = await enqueueStateWrite(() => loadState())')
   assert.ok(reload > 0 && calls[0].index < reload)
-  assert.match(driverPart, /writeBlockedStateBatch\(blockedStateBatch\.filter\(\(e\) => !done\.has\(e\.number\)\), savedItems\)/)
+  assert.match(driverPart, /writeBlockedStateBatch\(blockedStateBatch\.filter\(\(e\) => !done\.has\(e\.number\)\), savedItems, savedNoteHashes\)/)
 })
 
 test('配線: 新ラベル state:update-batch は runStateAgent 経由で、sonnet フォールバックと meta の説明に登録されている', () => {

@@ -2979,7 +2979,7 @@ function canonicalJson(v) {
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 const isNonNegInt = (x) => isInt(x) && x >= 0
 
-// 照合・採用する項目の射影（Issue #878 追記）。note は fix・monitor・merge-exec の要約が入る自由文で 500 文字を超え得て、読込エージェントが書き写し違えると項目ごと照合に落ちる（実機: 530〜593 文字の 4 件）。note は書き込み専用で読み込み後の判断に使わないため、読込側・検証側（state.sh verify の ST_VERIFY_PROJECT）・ホストの再計算の 3 つに同じ射影（note を除く）を掛け、書き写させない。返された項目に note があっても捨ててから照合する。状態ファイルの note は消えない（state.sh merge は項目を欄単位で足す）。
+// 照合・採用する項目の射影（Issue #878 追記）。note は fix・monitor・merge-exec の要約が入る自由文で 500 文字を超え得て、読込エージェントが書き写し違えると項目ごと照合に落ちる（実機: 530〜593 文字の 4 件）。note は書き込み専用で読み込み後の判断に使わないため、読込側・検証側（state.sh verify の ST_VERIFY_PROJECT）・ホストの再計算の 3 つに同じ射影（note を除く）を掛け、書き写させない。返された項目に note があっても捨ててから照合する。状態ファイルの note は消えない（state.sh merge は項目を欄単位で足す）。note の中身は読まないが、blocked の一括記録が「保存済みと同じ note か」を判定できるよう、state.sh verify の封筒の n（note の sha256）を noteHashes として別表で受ける（isUnchangedStatePatch）。
 const projectStateItem = (v) => {
   if (v === null || typeof v !== 'object' || Array.isArray(v)) return v
   const { note: _n, ...rest } = v
@@ -2989,6 +2989,7 @@ const projectStateItem = (v) => {
 function verifyLoadedItems(items, check) {
   const hashes = check?.fileExists === true && check.hashes ? check.hashes : null
   const adopted = {}
+  const adoptedNoteHashes = {}
   const dropped = []
   const loaded = items && typeof items === 'object' && !Array.isArray(items) ? items : {}
   for (const [k, raw] of Object.entries(loaded)) {
@@ -2996,6 +2997,8 @@ function verifyLoadedItems(items, check) {
     const val = projectStateItem(raw)
     if (/^[1-9]\d*$/.test(k) && /^[0-9a-f]{64}$/.test(h) && sha256Hex(canonicalJson(val)) === h) {
       adopted[k] = val
+      // 照合を通した項目にだけ note のハッシュを付ける（別の表。項目には混ぜない: 項目は patch や状態ファイルへ書き戻され得るため）
+      if (hasOwn(check.noteHashes ?? {}, k)) adoptedNoteHashes[k] = check.noteHashes[k]
     } else {
       dropped.push(k)
     }
@@ -3004,7 +3007,7 @@ function verifyLoadedItems(items, check) {
   // unverified: 読込側・検証側のキー集合の和（issue 番号のみ）のうち採用できなかったもの。呼び出し側は新規の実装・PR 作成をさせない（state-unverified）。読込側だけにあるキーも含める: 検証側のハッシュが欠けただけ（取りこぼし）か読込側の捏造かを区別できず、ハッシュが無いことは「実ファイルに無い」証明にならないため（Codex P1。保存済み PR を持つ項目を状態なしにして再実装させない）。
   const unverified = hashes === null ? [] : [...new Set([...Object.keys(loaded), ...Object.keys(hashes)])]
     .filter((k) => /^[1-9]\d*$/.test(k) && !hasOwn(adopted, k))
-  return { adopted, dropped, unverified, verified: hashes !== null && unverified.length === 0 && dropped.length === 0 }
+  return { adopted, adoptedNoteHashes, dropped, unverified, verified: hashes !== null && unverified.length === 0 && dropped.length === 0 }
 }
 
 // 照合入力 { fileExists, hashes, keysSha256, keysCount, highWaterBytes, highWaterVersion } の形の検査（Bugbot 指摘）。P5 以降はエージェントの応答の isValid ではなく、mergeStateVerify が全ページの封筒から組み立てた値の最終検査（封筒の isValid は isValidStateVerifyEnvelope）。必須フィールドの型をすべて検証し、hashes の値は 64 桁小文字 16 進のみ受理する。不成立なら mergeStateVerify が null を返し、loadState が停止する（状態なしに倒さない）。
@@ -3022,9 +3025,9 @@ function isValidStateVerifyResult(r) {
 const STATE_FILL_SCHEMA = obj(['items'], { items: { type: 'object', additionalProperties: true } })
 const isValidStateFillResult = (r) => r?.items !== null && typeof r?.items === 'object' && !Array.isArray(r.items)
 
-// state:load-verify の返却（scripts/state.sh verify の封筒。Issue #603 計画 C の P5）。payload は固定欄と entries（[{k: 項目番号, h: そのハッシュ}]）だけで、自由形式の object を持たない。
+// state:load-verify の返却（scripts/state.sh verify の封筒。Issue #603 計画 C の P5）。payload は固定欄と entries（[{k: 項目番号, h: そのハッシュ, n: note のハッシュ〔note が文字列でなければ空文字〕}]）だけで、自由形式の object を持たない。
 const STATE_VERIFY_PAYLOAD_SCHEMA = obj(['entries', 'highWaterBytes', 'highWaterVersion', 'inputSha256', 'keysCount', 'keysSha256', 'mode', 'outcome', 'page', 'pages'], {
-    entries: { type: 'array', items: obj(['h', 'k'], { h: SV_STR, k: SV_STR }) },
+    entries: { type: 'array', items: obj(['h', 'k', 'n'], { h: SV_STR, k: SV_STR, n: SV_STR }) },
     highWaterBytes: SV_INT, highWaterVersion: SV_INT, inputSha256: SV_STR, keysCount: SV_INT, keysSha256: SV_STR, mode: SV_STR, outcome: SV_STR, page: SV_INT, pages: SV_INT,
   })
 
@@ -3033,7 +3036,7 @@ const STATE_VERIFY_MAX_PAGES = 50
 function isValidStateVerifyEnvelope(r, nonce, page) {
   const s = verifySignedOutput(r, nonce, sha256Hex(`${STATE_FILE}\n${page}`))
   const p = s.payload
-  return s.ok && p.mode === 'verify' && p.page === page && ['ok', 'nofile', 'error'].includes(p.outcome) && Array.isArray(p.entries) && isInt(p.pages) && p.pages >= 1
+  return s.ok && p.mode === 'verify' && p.page === page && ['ok', 'nofile', 'error'].includes(p.outcome) && Array.isArray(p.entries) && p.entries.every((e) => /^([0-9a-f]{64})?$/.test(e?.n)) && isInt(p.pages) && p.pages >= 1
 }
 
 // 全ページの payload（検証済み）を従来の照合入力 { fileExists, hashes, keysSha256, keysCount, highWaterBytes, highWaterVersion } へ戻す純粋関数。nofile は「ファイルなし」、error（壊れた・読めない）・ページ間の食い違い（pages・keysSha256・keysCount・高水位・outcome）・不正なキーと重複キーは null（呼び出し側が停止する）。キーの欠落・追加は loadState の keysSha256 / keysCount の照合が止める
@@ -3042,14 +3045,16 @@ function mergeStateVerify(ps) {
   if (p0?.outcome === 'nofile') return { fileExists: false, hashes: {}, keysSha256: '', keysCount: 0, highWaterBytes: 0, highWaterVersion: 0 }
   if (p0?.outcome !== 'ok' || ps.length !== p0.pages) return null
   const hashes = {}
+  const noteHashes = {}
   for (const p of ps) {
     if (['outcome', 'pages', 'keysSha256', 'keysCount', 'highWaterBytes', 'highWaterVersion'].some((f) => p[f] !== p0[f])) return null
-    for (const { k, h } of p.entries) {
+    for (const { k, h, n } of p.entries) {
       if (!/^[1-9]\d*$/.test(k) || hasOwn(hashes, k)) return null
       hashes[k] = h
+      noteHashes[k] = /^[0-9a-f]{64}$/.test(n) ? n : ''
     }
   }
-  const r = { fileExists: true, hashes, keysSha256: p0.keysSha256, keysCount: p0.keysCount, highWaterBytes: p0.highWaterBytes, highWaterVersion: p0.highWaterVersion }
+  const r = { fileExists: true, hashes, noteHashes, keysSha256: p0.keysSha256, keysCount: p0.keysCount, highWaterBytes: p0.highWaterBytes, highWaterVersion: p0.highWaterVersion }
   return isValidStateVerifyResult(r) ? r : null
 }
 
@@ -3152,7 +3157,7 @@ async function loadState() {
     got.forEach(({ result: r }, i) => chunks[i].forEach((k) => { if (r && hasOwn(r.items, k)) items[k] = r.items[k] }))
     v = verifyLoadedItems(items, check)
   }
-  const { adopted, dropped, unverified, verified } = v
+  const { adopted, adoptedNoteHashes, dropped, unverified, verified } = v
   if (dropped.length > 0 || unverified.length > 0) {
     log(
       `⚠️ state-unverified ${unverified.length} 件（再取得 2 巡後も未照合: ${unverified.slice(0, 20).join(', ')}）`,
@@ -3162,6 +3167,7 @@ async function loadState() {
   const hwOk = check.fileExists === true
   return {
     items: adopted,
+    noteHashes: adoptedNoteHashes,
     verified,
     unverified: unverified.map(Number),
     keys: hwOk ? Object.keys(check.hashes) : [],
@@ -4617,10 +4623,13 @@ function stopNote(f, b) {
 }
 
 // 保存済み項目が patch の全キーで既に同じ値なら true（書いても何も変わらない）。status・note だけでなく patch に載る全キーを比べる: pr: 0 でクリアしたい項目の保存済み pr が 0 以外なら書く必要がある。 saved は loadState が内容照合を通した項目（adopted）のみ入る savedItems の値。照合できなかった項目・未保存の項目は undefined になり、省略せず書く側に倒れる。
-function isUnchangedStatePatch(saved, patch) {
+// note の比較（Issue #878）: loadState は note を読み込まない（projectStateItem）ので saved に note は無い。代わりに state.sh verify の封筒の n（保存済みの note の sha256）を loadState が noteHashes として返し、sha256Hex(patch.note) との一致で比べる。note の差（status が同じで理由だけ変わった blocked）は書き直す。noteHash が無い（照合されていない・n が空 = 保存済みに note が無い・旧封筒）ときは一致しないので「変化あり」に倒れる（fail-closed。書き直すだけで害は無い）。
+function isUnchangedStatePatch(saved, patch, noteHash) {
   if (saved === null || typeof saved !== 'object' || Array.isArray(saved)) return false
-  // 注意（Issue #878）: loadState は note を読み込まない（projectStateItem）ため、読み込んだ saved に note は無く、note を持つ patch は常に「変化あり」として書かれる。note の差を無視すると、status が同じで理由だけ変わった blocked の note が状態ファイルで古いままになるため、比べて書く側に倒す（書き直しは再実行ごとに chunk 数ぶんのエージェント呼び出しで済む）。
-  return Object.keys(patch).every((k) => hasOwn(saved, k) && JSON.stringify(saved[k]) === JSON.stringify(patch[k]))
+  return Object.keys(patch).every((k) => {
+    if (k === 'note') return isStr(patch.note) && /^[0-9a-f]{64}$/.test(noteHash ?? '') && sha256Hex(patch.note) === noteHash
+    return hasOwn(saved, k) && JSON.stringify(saved[k]) === JSON.stringify(patch[k])
+  })
 }
 
 // 1 チャンクを 1 エージェントで書く。patch は未信頼自由文（halted.reason 等）を含み得るため、 updateStateDetailed と同じ nonce 境界 + HEREDOC + --slurpfile で渡す。同一 patch は numbers に束ねて転記量を減らす。runStateAgent 経由のため StructuredOutput 未返却時は sonnet へ 1 回フォールバックする。
@@ -4648,13 +4657,13 @@ async function writeBlockedStateChunk(chunk, label) {
 
 // 溜めた blocked の patch（{ number, patch } の配列。同一 number は最後を採用）を状態ファイルへ一括記録する。チャンクは enqueueStateWrite で 1 つずつ直列に書く（read-modify-write の競合回避）。チャンク失敗は updateState 失敗時の既存の扱い（戻り値を見ずに続行）に合わせて続行し、記録できなかった件数を返す。エージェント数の上限に達すると以降のチャンクも書けないため、失敗した件数が返却値とログで分かることが唯一の可視化になる。
 // 返却: requested（記録しようとした件数）/ unchanged（保存済みと同一のため省略）/ attempted（書き込みを試みた件数）/ written（書けた件数）/ unwritten（書けなかった件数）/ unwrittenIssues（先頭 20 件）/ chunks / failedChunks。
-async function writeBlockedStateBatch(entries, savedItems) {
+async function writeBlockedStateBatch(entries, savedItems, noteHashes) {
   const latest = new Map()
   for (const e of entries) latest.set(assertInt(e.number, 'blocked batch number'), e.patch)
   const pending = []
   let unchanged = 0
   for (const [number, patch] of latest) {
-    if (isUnchangedStatePatch(savedItems?.[String(number)], patch)) unchanged++
+    if (isUnchangedStatePatch(savedItems?.[String(number)], patch, noteHashes?.[String(number)])) unchanged++
     else pending.push({ number, patch })
   }
   const chunks = []
@@ -6147,6 +6156,7 @@ if (skillDir) await precheckScriptHashes()
 
 const {
   items: savedItems,
+  noteHashes: savedNoteHashes,
   highWaterBytes: loadedHighWaterBytes,
   highWaterVersion: loadedHighWaterVersion,
   verified: savedItemsVerified,
@@ -9619,7 +9629,7 @@ if (interrupted.length > 0) {
 
 // blocked 確定分（cascade + 未着手）の状態ファイル記録を 1 回にまとめる（Issue #585）。終了時の loadState 再読込（孤立 worktree 判定）より前に完了させ、ラン内の全書込みを反映した状態を正本にする。保存済みと同一（status・note・pr が一致）の項目は書かない。失敗は続行し、記録しようとした件数と書けた件数の差をログと返却値（blockedStateWrite）で報告する。ラン中に前提完了プローブ等で done に入ったノードは、開始時の blocked の予約があっても書かない（古い blocked で上書きしない）。
 // 除外分は requested に数えない。
-const blockedStateWrite = await writeBlockedStateBatch(blockedStateBatch.filter((e) => !done.has(e.number)), savedItems)
+const blockedStateWrite = await writeBlockedStateBatch(blockedStateBatch.filter((e) => !done.has(e.number)), savedItems, savedNoteHashes)
 if (blockedStateWrite.requested > 0) {
   log(`blocked の状態ファイル記録: 対象 ${blockedStateWrite.requested} 件（保存済みと同一で省略 ${blockedStateWrite.unchanged} 件・書き込み ${blockedStateWrite.written} / ${blockedStateWrite.attempted} 件・エージェント ${blockedStateWrite.chunks} 回）`)
 }

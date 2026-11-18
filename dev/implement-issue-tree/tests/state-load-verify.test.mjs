@@ -233,7 +233,7 @@ test('verifyLoadedItems: 検証未返却・ファイルなし申告・不正ハ�
 
 test('verifyLoadedItems: 空ファイル（items: {}）は空のまま verified: true（新規作成直後）', () => {
   const r = verifyLoadedItems({}, { fileExists: true, hashes: {} })
-  assert.deepEqual(r, { adopted: {}, dropped: [], unverified: [], verified: true })
+  assert.deepEqual(r, { adopted: {}, adoptedNoteHashes: {}, dropped: [], unverified: [], verified: true })
 })
 
 test('prBindingProblem: 別 issue（#359）のブランチ・closingIssues の PR は結び付けない', () => {

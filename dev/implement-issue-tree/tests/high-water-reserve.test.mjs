@@ -189,7 +189,7 @@ test('配線: savedItems 取得が loadState() の分割代入へ変更され hi
   assert.match(
     source,
     // verified / unverified は状態ファイル読込の内容照合の成否と、照合できなかった issue 番号。keys は照合した実ファイルのキー（終了時の照合の予備の見積り。PR #810）。
-    /const \{\s*items: savedItems,\s*highWaterBytes: loadedHighWaterBytes,\s*highWaterVersion: loadedHighWaterVersion,\s*verified: savedItemsVerified,\s*unverified: stateUnverified,\s*keys: stateKeys,?\s*\} = await loadState\(\)/,
+    /const \{\s*items: savedItems,\s*noteHashes: savedNoteHashes,\s*highWaterBytes: loadedHighWaterBytes,\s*highWaterVersion: loadedHighWaterVersion,\s*verified: savedItemsVerified,\s*unverified: stateUnverified,\s*keys: stateKeys,?\s*\} = await loadState\(\)/,
   )
 })
 
