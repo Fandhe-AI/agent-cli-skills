@@ -735,3 +735,26 @@ test('createWorktree: add の前のパスの確認が ENOENT 以外のエラー�
   }
   assert.ok(!fake.calls().includes('add'), fake.calls().join(','))
 })
+test('runExclusive: createWorktree と同じキューで直列になる（remove 側が走っている間は add を始めない）。失敗しても後続を止めない', async () => {
+  const sb = sandbox()
+  const ref = sandbox()
+  const events = []
+  let release
+  const gate = new Promise((r) => { release = r })
+  // 掃除側（worktree-remove.sh の直接実行に相当）が gate を握っている間に、同じリポジトリの add を積む
+  const held = worktreeMod.runExclusive(sb.main, async () => { events.push('remove-start'); await gate; events.push('remove-end') })
+  const add = createWorktree({ mainRoot: sb.main, runId: newRunId(), n: 1, fetch: false, lock: false }).then((w) => { events.push('add-done'); return w })
+  // 別のリポジトリのキューは独立。実時間で待たず、別リポの add の完了（git の作業が一巡する時間）を基準にする
+  const other = await createWorktree({ mainRoot: ref.main, runId: newRunId(), n: 1, fetch: false, lock: false })
+  assert.ok(existsSync(other.path), '別リポジトリは待たされない')
+  assert.deepEqual(events, ['remove-start'], '同じリポジトリの add は remove の間は始まらない')
+  assert.ok(!existsSync(join(sb.main, '.claude', 'worktrees')), 'add のディレクトリ作成もまだ')
+  release()
+  const wt = await add
+  await held
+  assert.deepEqual(events, ['remove-start', 'remove-end', 'add-done'])
+  assert.ok(existsSync(wt.path))
+  // 失敗はそのまま投げ、後続は止めない
+  await assert.rejects(worktreeMod.runExclusive(sb.main, async () => { throw new Error('boom') }), /boom/)
+  assert.equal(await worktreeMod.runExclusive(sb.main, async () => 'next'), 'next')
+})

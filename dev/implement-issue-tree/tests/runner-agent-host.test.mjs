@@ -18,6 +18,7 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { gitEnv, makeRepo } from './lib/worktree-sandbox.mjs'
 import { makeFakeAdapterModule } from './lib/fake-adapter.mjs'
 import { createAgentHost, EXEC_RULES, checkExecRule, interpretExecResult, killScriptsSync, parseExecSpec, spawnScript } from '../../../skills/implement-issue-tree/runner/lib/agent-host.mjs'
+import { createWorktree as realCreateWorktree } from '../../../skills/implement-issue-tree/runner/lib/worktree.mjs'
 import { AdapterError, KINDS } from '../../../skills/implement-issue-tree/runner/lib/adapter-error.mjs'
 import { loadConfig, resolveModel } from '../../../skills/implement-issue-tree/runner/lib/models.mjs'
 import { buildPreamble, buildSchemaInstruction, SHELL_NOTE } from '../../../skills/implement-issue-tree/runner/lib/preamble.mjs'
@@ -902,4 +903,75 @@ test('merge-exec の cwd（Phase 4）: 置き場がリポジトリの中なら�
   assert.equal(calls[0].cwd, mainRoot)
   assert.ok(logs.some((x) => x.includes('リポジトリの外')), logs.join('\n'))
   assert.deepEqual(readdirSync(repo.main).filter((f) => f.startsWith('iit-merge-')), [], '作った置き場は消す')
+})
+
+// ---- 直接実行する worktree-remove.sh・recover-prep.sh と隔離 worktree の作成は同じキュー（リポジトリ単位）で直列 ----
+
+// 偽の spawnScript。起動を events に残し、gates が開くまで終わらない（実時間で待たない）
+function holdingSpawn() {
+  const events = []
+  const gates = []
+  const spawn = async (_file, args) => {
+    const script = args[2]
+    events.push(`spawn:${script}`)
+    await new Promise((r) => gates.push(r))
+    events.push(`spawn-end:${script}`)
+    return { code: 0, stdout: 'WORKTREE_REMOVE_RESULT {"ok":true,"retained":false}\nSTATE_RESULT {"ok":true}\n', stderr: '', timedOut: false, overflow: false }
+  }
+  return { spawn, events, release: () => gates.splice(0).forEach((r) => r()) }
+}
+
+function repoWithOrigin() {
+  const repo = makeRepo()
+  repo.git(repo.main, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+  return repo
+}
+
+function hostFor(main, spawn) {
+  const mod = makeFakeAdapterModule({ reply: () => ({ ok: true, n: 1 }) })
+  return createAgentHost({ adapter: mod.createAdapter({}), cfg: { config: config(), skillDir, mainRoot: main, runId: RUN_ID, spawnScript: spawn, createWorktree: (p) => realCreateWorktree({ ...p, fetch: false, lock: false }) } })
+}
+
+const wtDir = (main) => join(main, '.claude', 'worktrees')
+
+test('直接実行の worktree-remove.sh と recover-prep.sh は隔離 worktree の作成（git worktree add）と重ならない', async () => {
+  const specs = {
+    'worktree-remove.sh': [withSpec({ v: 1, script: 'worktree-remove.sh', sha256: SHA, argv: ['sweep', '--file', 'f'], ret: 'line:WORKTREE_REMOVE_RESULT', stdinHex: hex('') }), { label: 'worktree:sweep', schema: SWEEP }],
+    'recover-prep.sh': [withSpec({ v: 1, script: 'recover-prep.sh', sha256: SHA, argv: ['--mode', 'free', '--path', '/w'], ret: 'exit-ok' }), { label: 'free:#2', schema: STATE_WRITE }],
+  }
+  for (const [script, [spec, opts]] of Object.entries(specs)) {
+    const repo = repoWithOrigin()
+    const ref = repoWithOrigin()
+    const hold = holdingSpawn()
+    const running = hostFor(repo.main, hold.spawn)(spec, opts)
+    const iso = hostFor(repo.main, hold.spawn)('b', { label: 'impl:#2', schema: SCHEMA, isolation: 'worktree' })
+    // 別リポジトリの作成が終わるまでを時間の基準にする（別リポジトリのキューは独立）
+    await hostFor(ref.main, hold.spawn)('c', { label: 'impl:#3', schema: SCHEMA, isolation: 'worktree' })
+    assert.ok(existsSync(wtDir(ref.main)), `${script}: 別リポジトリは待たされない`)
+    assert.ok(hold.events.includes(`spawn:${script}`), hold.events.join(','))
+    assert.ok(!existsSync(wtDir(repo.main)), `${script} の実行中は同じリポジトリの add を始めない`)
+    hold.release()
+    await running
+    await iso
+    assert.ok(existsSync(wtDir(repo.main)), `${script} が終わった後に add が進む`)
+  }
+})
+
+test('スクリプトが失敗・時間切れで返っても、後続の隔離 worktree の作成は止まらない。state.sh は worktree を書かないのでキューに通さない', async () => {
+  const repo = repoWithOrigin()
+  const failing = async () => ({ code: null, stdout: '', stderr: '', timedOut: true, overflow: false })
+  const rm = withSpec({ v: 1, script: 'worktree-remove.sh', sha256: SHA, argv: ['sweep', '--file', 'f'], ret: 'line:WORKTREE_REMOVE_RESULT', stdinHex: hex('') })
+  assert.deepEqual(await hostFor(repo.main, failing)(rm, { label: 'worktree:sweep', schema: SWEEP }), { removed: [] })
+  const throwing = async () => { throw new Error('spawn が落ちた') }
+  await assert.rejects(hostFor(repo.main, throwing)(rm, { label: 'worktree:sweep', schema: SWEEP }), /spawn が落ちた/)
+  await hostFor(repo.main, failing)('b', { label: 'impl:#2', schema: SCHEMA, isolation: 'worktree' })
+  assert.ok(existsSync(wtDir(repo.main)), '前の失敗の後でも add は進む')
+  const hold = holdingSpawn()
+  const host = hostFor(repo.main, hold.spawn)
+  const st = host(withSpec({ v: 1, script: 'state.sh', sha256: SHA, argv: ['--file', 'f', 'merge'], ret: 'line:STATE_RESULT' }), { label: 'state:update:#2', schema: STATE_WRITE })
+  await host('c', { label: 'impl:#3', schema: SCHEMA, isolation: 'worktree' })
+  assert.ok(hold.events.includes('spawn:state.sh'))
+  assert.ok(!hold.events.includes('spawn-end:state.sh'), 'state.sh が走っている間も add は進む')
+  hold.release()
+  await st
 })
