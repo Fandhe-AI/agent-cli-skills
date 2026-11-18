@@ -524,6 +524,59 @@ test('掃除の予算: createWorktree 等のキューで長く待たされても
   }
 })
 
+test('掃除の予算: remove の後の relockOwn がキューで長く待たされても、state.sh には「予算 − remove の実行時間」が渡る（下流の Bugbot 指摘・#882 の 2 巡目）', async () => {
+  const s = setup({ issue: 2, name: 'pre-existing' })
+  const mod = makeFakeAdapterModule({ reply: () => ({ ok: true }) })
+  const clock = mock.timers
+  clock.enable({ apis: ['Date'], now: 1_000_000 })
+  try {
+    const seen = []
+    let release
+    let held
+    let removeMs = 0
+    const run = async (_file, argv, opts) => {
+      seen.push({ script: argv[2], timeoutMs: opts.timeoutMs })
+      if (argv[2] === 'worktree-remove.sh') {
+        clock.tick(removeMs)
+        // remove の直後（relockOwn の前）に、別のエージェントの createWorktree 相当がキューを握る
+        held = worktreeMod.runExclusive(s.main, () => new Promise((r) => { release = r }))
+        return { code: 0, stdout: 'WORKTREE_REMOVE_RESULT {"ok":true,"retained":false,"worktree":"removed"}\n', stderr: '', timedOut: false, overflow: false }
+      }
+      return { code: 0, stdout: 'STATE_RESULT {"ok":true}\n', stderr: '', timedOut: false, overflow: false }
+    }
+    const agent = createAgentHost({ adapter: mod.createAdapter({}), cfg: { config: loadConfig(), skillDir: SKILL_DIR, mainRoot: s.main, runId: RUN_ID, args: { parent: PARENT }, spawnScript: run, createWorktree: lockedWorktreeMaker(s.repo, s.main) } })
+    await agent('impl', { label: 'impl:#2', schema: OK_SCHEMA, isolation: 'worktree' })
+    const own = join(s.main, '.claude', 'worktrees', `${RUN_ID}-1`)
+    writeFileSync(s.stateFile, `${JSON.stringify({ items: { 2: { status: 'merged', worktree: own } } })}\n`)
+    const { prompt, label } = await cleanupPromptOf(2, { status: 'merged', worktree: own }, { cleanupWorktree: own })
+    const drive = async (ms, wait) => {
+      removeMs = ms
+      seen.length = 0
+      release = undefined
+      const pending = agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+      // unlock・remove の実 git の分だけ実時間で少し待つ（偽の時計は Date だけで、setTimeout は実物）
+      for (let i = 0; i < 2000 && release === undefined; i++) await new Promise((r) => setTimeout(r, 5))
+      assert.ok(release, '前提: remove の後でキューが握られている')
+      clock.tick(wait)
+      release()
+      await held
+      return pending
+    }
+    await drive(0, 0)
+    const full = seen[0].timeoutMs
+    assert.ok(full > 1, `前提: 満額の予算は 1 ms より大きい（${full}）`)
+    assert.equal(seen[1].timeoutMs, full, '待ちも実行も 0 なら 2 段目も満額')
+    const got = await drive(1000, full * 10)
+    assert.equal(got.worktree, 'removed')
+    assert.deepEqual(seen.map((x) => x.script), ['worktree-remove.sh', 'state.sh'])
+    assert.equal(seen[1].timeoutMs, full - 1000, 'relock のキュー待ちは数えず、remove の実行時間だけが減る')
+    await drive(full + 5000, full * 10)
+    assert.equal(seen[1].timeoutMs, 1, '実行時間の合計が予算を超えたら 2 段目は 1 ms')
+  } finally {
+    clock.reset()
+  }
+})
+
 test('掃除の予算: 2 段で 1 つの予算。remove の実処理で使った分だけ state.sh の予算が減り、超えれば 1 ms になる', async () => {
   const s = setup()
   const { prompt, label } = await cleanupPromptOf(2, { status: 'merged', worktree: s.wt }, { cleanupWorktree: s.wt })
