@@ -144,6 +144,46 @@ test('2 段目（state.sh）が失敗したら、1 段目の結果のまま ok �
   assert.equal(s.state().items['2'].worktree, s.wt)
 })
 
+// 1 回目は 2 段目だけが失敗し（worktree は消えたのに記録が残る）、同じ掃除の再実行で 1 段目が not-registered を返して 2 段目が走り、記録が消える。
+// 上のテストと「手で消された worktree」のテストに分かれている確認を、同じ状態のまま 2 回続けて回復まで固定する（PR #883 の回復経路）。
+// 2 回とも別のホスト（failState の有無だけが違う）で、同じプロンプトと label を渡す。
+async function assertRetryRecovers(s, issue, patch, options, { firstBranchSha }) {
+  const { prompt, label } = await cleanupPromptOf(issue, patch, options)
+  const call = (h) => h.agent(prompt, { label, phase: 'State', model: 'haiku', effort: 'low', schema: CLEANUP_SCHEMA })
+  const first = makeHost(s.main, s.repo.root, { failState: true })
+  const got1 = await call(first)
+  assert.equal(got1.ok, false, '1 回目: 2 段目の失敗で ok:false')
+  assert.equal(got1.worktree, 'removed', '1 回目: 1 段目は成功している')
+  assert.equal(got1.branchSha ?? '', firstBranchSha, '1 回目の branchSha')
+  assert.equal(existsSync(s.wt), false, '1 回目: worktree は消えている')
+  assert.equal(s.state().items[String(issue)].worktree, s.wt, '1 回目: 状態に古いパスが残る')
+  const second = makeHost(s.main, s.repo.root)
+  const got2 = await call(second)
+  assert.equal(second.calls.length, 0, 'アダプタ（モデル）を呼ばない')
+  assert.equal(got2.ok, true, `2 回目: 回復する ${second.logs.join('\n')}`)
+  assert.equal(got2.worktree, 'not-registered', '2 回目: 1 段目は登録なしの語を返す')
+  assert.equal(got2.branchSha ?? '', '', '2 回目の branchSha は空')
+  assert.equal(s.state().items[String(issue)].worktree, '', '2 回目: 状態の worktree が空になる')
+  assert.equal(s.state().items[String(issue)].status, 'merged', '他のフィールドは変えない')
+}
+
+test('2 段目の失敗からの再実行（superseded）: 1 回目は ok:false で記録が残り、2 回目は not-registered で記録が消えて ok:true', async () => {
+  const s = setup()
+  await assertRetryRecovers(s, 2, { status: 'merged', worktree: s.wt }, { cleanupWorktree: s.wt }, { firstBranchSha: '' })
+})
+
+test('2 段目の失敗からの再実行（discard + expectBranch）: 1 回目は ok:false で記録が残り、2 回目は not-registered で記録が消えて ok:true', async () => {
+  const s = setup()
+  await assertRetryRecovers(s, 2, { worktree: '' }, { cleanupWorktree: s.wt, cleanupMode: 'discard', expectBranch: 'feat/2-x' }, { firstBranchSha: '' })
+})
+
+test('2 段目の失敗からの再実行（discard + --branch）: 1 回目は消す前の先頭 sha を返して ok:false、2 回目は branchSha が空で not-registered・ok:true', async () => {
+  const s = setup({ issue: 3, name: `${RUN_ID}-3` })
+  const head = s.repo.head(s.wt)
+  await assertRetryRecovers(s, 3, { branch: 'feat/3-x' }, { cleanupWorktree: s.wt, cleanupMode: 'discard', deleteBranch: true }, { firstBranchSha: head })
+  assert.doesNotMatch(s.repo.git(s.main, 'branch', '--list', 'feat/3-x'), /feat/, 'ブランチも消えている')
+})
+
 test('拒否（label の形が違う）: 掃除の段として扱わず、ホストは何も実行しない（従来どおりモデルへ回る）', async () => {
   for (const bad of ['state:cleanup:#02', 'state:cleanupx:#2', 'state:cleanup:#2:retry', 'state:cleanup:2', 'xstate:cleanup:#2', 'state:cleanup:#2-retry']) {
     const s = setup()
