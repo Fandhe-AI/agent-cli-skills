@@ -11,6 +11,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { importDefinitions, runScript, BASE_ARGS, source } from './lib/stub-run.mjs'
+import { noNote } from './lib/state-project.mjs'
 
 globalThis.args = { parent: 1, skillDir: '/opt/skills/implement-issue-tree' }
 const m = await importDefinitions(
@@ -272,7 +273,7 @@ test('discard で .worktree を空にする patch は JSON マージに含めず
 // ---- 3. Recover の流れ ----
 
 const ITEM = { type: 'implement', status: 'failed', pr: 0, branch: 'feat/2-x', worktree: '/repo/wt/old', fixCount: 0, note: '' }
-const hashes = Object.fromEntries(Object.entries({ 2: ITEM }).map(([k, v]) => [k, m.sha256Hex(m.canonicalJson(v))]))
+const hashes = Object.fromEntries(Object.entries({ 2: ITEM }).map(([k, v]) => [k, m.sha256Hex(m.canonicalJson(noNote(v)))]))
 const keysSha = m.sha256Hex(m.canonicalJson(Object.keys(hashes).sort()))
 
 function recoverRun({ decision, wipCommitted, cleanup, branch = 'feat/2-x', argsExtra = {} }) {
@@ -420,7 +421,7 @@ test('Recover continue: 掃除が HEAD の不一致で保持した（detached・
 const BLOCKED = { type: 'implement', status: 'blocked', pr: 0, branch: '', worktree: '/repo/wt/old', fixCount: 0, note: 'x' }
 const bKeysSha = m.sha256Hex(m.canonicalJson(['2']))
 function absentRun({ absent, recover = {}, saved = BLOCKED, cleanup = { ok: true, retained: false } }) {
-  const h = { 2: m.sha256Hex(m.canonicalJson(saved)) }
+  const h = { 2: m.sha256Hex(m.canonicalJson(noNote(saved))) }
   return runScript({
     args: BASE_ARGS,
     override: (label) => {

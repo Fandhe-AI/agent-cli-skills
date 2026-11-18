@@ -24,6 +24,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripMetaExport } from './lib/workflow-script-contract.mjs'
 import { externalChecksReply, hashPrecheckReply, stateVerifyReply, wrapTreeReply } from './lib/signed-output.mjs'
 import { requestedNumbersOf } from './lib/declared-deps-prompt.mjs'
+import { noNote } from './lib/state-project.mjs'
 
 const SCRIPT_PATH = process.env.IIT_BLOCKED_BATCH_SCRIPT_PATH ?? join(
   dirname(fileURLToPath(import.meta.url)),
@@ -113,6 +114,8 @@ test('isUnchangedStatePatch: patch の全キーが保存済みと一致すると
   assert.equal(isUnchangedStatePatch(saved, BLOCKED), true)
   assert.equal(isUnchangedStatePatch(undefined, BLOCKED), false, '読めていない項目は省略せず書く')
   assert.equal(isUnchangedStatePatch({ ...saved, note: 'other' }, BLOCKED), false)
+  // 読み込んだ項目は note を持たない（Issue #878）ので、note を持つ patch は変化ありとして書く（note だけの差を取りこぼさない）
+  assert.equal(isUnchangedStatePatch({ type: 'implement', status: 'blocked', pr: 0, branch: '' }, BLOCKED), false)
   assert.equal(isUnchangedStatePatch({ ...saved, pr: 42 }, BLOCKED), false, 'pr をクリアする必要がある項目は書く')
   assert.equal(isUnchangedStatePatch({ status: 'blocked', note: 'n' }, BLOCKED), false, 'pr キーが無ければ書く')
   assert.equal(isUnchangedStatePatch(saved, { status: 'blocked', note: 'n' }), true, 'pr を触らない patch は pr を比較しない')
@@ -316,7 +319,7 @@ function stateVerifyFor(items) {
   const keys = Object.keys(items).sort()
   return {
     fileExists: true,
-    hashes: Object.fromEntries(keys.map((k) => [k, sha256Hex(canonicalJson(items[k]))])),
+    hashes: Object.fromEntries(keys.map((k) => [k, sha256Hex(canonicalJson(noNote(items[k])))])),
     keysSha256: sha256Hex(canonicalJson(keys)),
     keysCount: keys.length,
     highWaterBytes: 0,
@@ -399,7 +402,7 @@ test('結合: ツリー外前提待ちのノードが N 件でも、blocked 記�
   }
 })
 
-test('結合: 同じ引数で再実行しても、保存済みと同じ blocked・note のノードには書き込みエージェントが起動しない', async () => {
+test('結合: 再実行では、保存済みの note を読み込まないので blocked の patch は書き直される（note の差を取りこぼさない。Issue #878）', async () => {
   const nodes = leafNodes(30)
   const first = await runScript({ args: { parent: 1 }, nodes })
   const patches = patchesFromBatchCalls(first.calls)
@@ -407,18 +410,13 @@ test('結合: 同じ引数で再実行しても、保存済みと同じ blocked�
   const saved = Object.fromEntries(
     Object.entries(patches).map(([n, p]) => [n, { type: 'implement', status: 'pending', pr: 0, branch: '', worktree: '', fixCount: 0, ...p }]),
   )
+  // loadState は note を除いた項目を返す（読込側・検証側・ホストの射影）ので、note を持つ patch は常に「変化あり」になる
   const second = await runScript({ args: { parent: 1 }, nodes, saved })
-  assert.equal(batchCalls(second.calls).length, 0, '変化が無ければ書かない')
   assert.equal(second.result.blockedStateWrite.requested, 31)
-  assert.equal(second.result.blockedStateWrite.unchanged, 31)
-  assert.equal(second.result.blockedStateWrite.written, 0)
-  assert.equal(second.result.done.filter((d) => d.status === 'blocked').length, 31, '報告（results）は書き込みの有無によらず全件')
-
-  // 一部だけ note が違えばその分だけ書く
-  const drifted = { ...saved, 5: { ...saved[5], note: '古い note' } }
-  const third = await runScript({ args: { parent: 1 }, nodes, saved: drifted })
-  assert.equal(batchCalls(third.calls).length, 1)
-  assert.deepEqual(Object.keys(patchesFromBatchCalls(third.calls)), ['5'])
+  assert.equal(second.result.blockedStateWrite.unchanged, 0)
+  assert.equal(second.result.blockedStateWrite.written, 31)
+  assert.equal(second.result.done.filter((d) => d.status === 'blocked').length, 31, '報告（results）は全件')
+  assert.deepEqual(patchesFromBatchCalls(second.calls), patches, '書く内容は 1 回目と同じ')
 })
 
 test('結合: 途中のチャンクが失敗すると、返却値とログから件数のずれが分かる', async () => {

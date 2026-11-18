@@ -2960,13 +2960,21 @@ function canonicalJson(v) {
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
 const isNonNegInt = (x) => isInt(x) && x >= 0
 
+// 照合・採用する項目の射影（Issue #878 追記）。note は fix・monitor・merge-exec の要約が入る自由文で 500 文字を超え得て、読込エージェントが書き写し違えると項目ごと照合に落ちる（実機: 530〜593 文字の 4 件）。note は書き込み専用で読み込み後の判断に使わないため、読込側・検証側（state.sh verify の ST_VERIFY_PROJECT）・ホストの再計算の 3 つに同じ射影（note を除く）を掛け、書き写させない。返された項目に note があっても捨ててから照合する。状態ファイルの note は消えない（state.sh merge は項目を欄単位で足す）。
+const projectStateItem = (v) => {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return v
+  const { note: _n, ...rest } = v
+  return rest
+}
+
 function verifyLoadedItems(items, check) {
   const hashes = check?.fileExists === true && check.hashes ? check.hashes : null
   const adopted = {}
   const dropped = []
   const loaded = items && typeof items === 'object' && !Array.isArray(items) ? items : {}
-  for (const [k, val] of Object.entries(loaded)) {
+  for (const [k, raw] of Object.entries(loaded)) {
     const h = hashes && hasOwn(hashes, k) ? hashes[k] : ''
+    const val = projectStateItem(raw)
     if (/^[1-9]\d*$/.test(k) && /^[0-9a-f]{64}$/.test(h) && sha256Hex(canonicalJson(val)) === h) {
       adopted[k] = val
     } else {
@@ -3067,7 +3075,7 @@ async function loadState() {
       `1. ${STATE_FILE} が存在するか test -f で確認する。`,
       `2. ファイルが存在する場合:`,
       `   a. jq . ${STATE_FILE} でパースを試みる（jq の終了コードで成否を判断する）。`,
-      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。items は 5 件ずつ分けて読み、読めた分だけ返す（欠落キーはホストが再取得する。見えない値を推測で埋めない）。highWaterBytes は .perWorktreeByteReserveHighWater、highWaterVersion は .perWorktreeByteReserveHighWaterVersion の値（無ければ 0）。`,
+      `   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。items は 5 件ずつ分けて読み、読めた分だけ返す（欠落キーはホストが再取得する。見えない値を推測で埋めない）。各項目から note 欄は除いて返す（書き写さない。jq の map_values(del(.note)) 等。ホストは note を使わず、長い文字列の書き写し違いが照合を落とすため）。highWaterBytes は .perWorktreeByteReserveHighWater、highWaterVersion は .perWorktreeByteReserveHighWaterVersion の値（無ければ 0）。`,
       `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`,
       readOnly
         ? `3. ファイルが存在しない場合: 読み取り専用のためディレクトリもファイルも作らない。ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`
@@ -3117,7 +3125,7 @@ async function loadState() {
     const got = []
     for (let b = 0; b < chunks.length; b += 2) {
       got.push(...await Promise.all(chunks.slice(b, b + 2).map((ks) => runStateAgent(
-        `状態ファイル項目の読み取り（読み取り専用）。${TEMP_FILE_POLICY}\n次をそのまま実行し、出力 JSON を items として返す（推測で埋めない）:\njq -c --argjson k '${JSON.stringify(ks)}' '.items | with_entries(select(.key as $x | $k | index($x)))' ${STATE_FILE}`,
+        `状態ファイル項目の読み取り（読み取り専用）。${TEMP_FILE_POLICY}\n次をそのまま実行し、出力 JSON を items として返す（推測で埋めない）:\njq -c --argjson k '${JSON.stringify(ks)}' '.items | with_entries(select(.key as $x | $k | index($x))) | map_values(if type == "object" then del(.note) else . end)' ${STATE_FILE}`,
         { label: 'state:load-fill', schema: STATE_FILL_SCHEMA, isValid: isValidStateFillResult },
       ))))
     }
@@ -4592,6 +4600,7 @@ function stopNote(f, b) {
 // 保存済み項目が patch の全キーで既に同じ値なら true（書いても何も変わらない）。status・note だけでなく patch に載る全キーを比べる: pr: 0 でクリアしたい項目の保存済み pr が 0 以外なら書く必要がある。 saved は loadState が内容照合を通した項目（adopted）のみ入る savedItems の値。照合できなかった項目・未保存の項目は undefined になり、省略せず書く側に倒れる。
 function isUnchangedStatePatch(saved, patch) {
   if (saved === null || typeof saved !== 'object' || Array.isArray(saved)) return false
+  // 注意（Issue #878）: loadState は note を読み込まない（projectStateItem）ため、読み込んだ saved に note は無く、note を持つ patch は常に「変化あり」として書かれる。note の差を無視すると、status が同じで理由だけ変わった blocked の note が状態ファイルで古いままになるため、比べて書く側に倒す（書き直しは再実行ごとに chunk 数ぶんのエージェント呼び出しで済む）。
   return Object.keys(patch).every((k) => hasOwn(saved, k) && JSON.stringify(saved[k]) === JSON.stringify(patch[k]))
 }
 

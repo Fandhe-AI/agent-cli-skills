@@ -2960,6 +2960,13 @@ return a(v).replace(/\x7f/g, '\\u007f')
 const Zp=(o,k)=>Object.prototype.hasOwnProperty.call(o,k)
 const qv=(x)=>M1(x)&&x>=0
 
+
+const xC=(v)=>{
+if(v===null||typeof v!=='object'||Array.isArray(v))return v
+const{note:a, ...b}=v
+return b
+}
+
 function Ss(a,b){
 const c=b?.fileExists===true&&b.hashes?b.hashes:null
 const d={}
@@ -2967,8 +2974,9 @@ const e=[]
 const f=a&&typeof a==='object'&& !Array.isArray(a)?a:{}
 for(const[k,a]of Object.entries(f)){
 const h=c&&Zp(c,k)?c[k]:''
-if(/^[1-9]\d*$/.test(k) && /^[0-9a-f]{64}$/.test(h) && UF(gx(a)) === h) {
-d[k]=a
+const b=xC(a)
+if(/^[1-9]\d*$/.test(k) && /^[0-9a-f]{64}$/.test(h) && UF(gx(b)) === h) {
+d[k]=b
 }else{
 e.push(k)
 }
@@ -3067,7 +3075,7 @@ r5,
 `1. ${Hz} が存在するか test -f で確認する。`,
 `2. ファイルが存在する場合:`,
 `   a. jq . ${Hz} でパースを試みる（jq の終了コードで成否を判断する）。`,
-`   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。items は 5 件ずつ分けて読み、読めた分だけ返す（欠落キーはホストが再取得する。見えない値を推測で埋めない）。highWaterBytes は .perWorktreeByteReserveHighWater、highWaterVersion は .perWorktreeByteReserveHighWaterVersion の値（無ければ 0）。`,
+`   b. パース成功: items フィールドを返す。ok: true, fileExisted: true。items は 5 件ずつ分けて読み、読めた分だけ返す（欠落キーはホストが再取得する。見えない値を推測で埋めない）。各項目から note 欄は除いて返す（書き写さない。jq の map_values(del(.note)) 等。ホストは note を使わず、長い文字列の書き写し違いが照合を落とすため）。highWaterBytes は .perWorktreeByteReserveHighWater、highWaterVersion は .perWorktreeByteReserveHighWaterVersion の値（無ければ 0）。`,
 `   c. パース失敗（jq が 0 以外の終了コード）: ok: false, fileExisted: true, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`,
 a
 ?`3. ファイルが存在しない場合: 読み取り専用のためディレクトリもファイルも作らない。ok: true, fileExisted: false, items: {}, highWaterBytes: 0, highWaterVersion: 0 を返す。`
@@ -3117,7 +3125,7 @@ if(!b.length)break
 const c=[]
 for(let a=0;a<b.length;a+=2){
 c.push(...await Promise.all(b.slice(a,a+ 2).map((a)=>j3(
-`状態ファイル項目の読み取り（読み取り専用）。${r5}\n次をそのまま実行し、出力 JSON を items として返す（推測で埋めない）:\njq -c --argjson k '${JSON.stringify(a)}' '.items | with_entries(select(.key as $x | $k | index($x)))' ${Hz}`,
+`状態ファイル項目の読み取り（読み取り専用）。${r5}\n次をそのまま実行し、出力 JSON を items として返す（推測で埋めない）:\njq -c --argjson k '${JSON.stringify(a)}' '.items | with_entries(select(.key as $x | $k | index($x))) | map_values(if type == "object" then del(.note) else . end)' ${Hz}`,
 {label:'state:load-fill',schema:G0,isValid:cI},
 ))))
 }
@@ -3637,19 +3645,19 @@ return''
 
 
 const aG={
-'measure-residual-bytes.sh':'27206aeb4fab9ad378fe5f97706eb8ebcac1ad1fac6e6f9caadecc0c66f84561',
-'measure-free-disk.sh':'e2302a52784d900a21b48b5990dd9d0b284f6e5872edeb201f1e5c42d57645ee',
-'observe-pr.sh':'f1ced24a950ad5204cf71324343185fa1f4b94b4c1d538ae1eef8c2eeed6a832',
-'base-merge.sh':'b62b1cd28b098472ff27e3f1f1de4c4f6ecaca127b8db06e4cca1e4dd38c9ce3',
-'pr-push.sh':'d2bee381b63b95847c777cc63311a30ff032ab6a48c48b400b0ed1eb17aa106f',
-'reply-resolve.sh':'a9189730cf96c0cd6cc93fb53da6c0b6aa8582425c03947e02cfcda2506d973d',
-'state.sh':'acf7a5429877d7f3ffaa263297e8891f21e87c0193fd2f12e1e4a220adee0df3',
-'merge-gate.sh':'64c55b2be12fa1aedd654cd81ae5a34345eecd8cde45559e98e068b7ebab38f6',
-'worktree-remove.sh':'9c37adbbd59000f4aa0e18633928cf15a9b2453d7c0d0729ed5145710017590c',
-'recover-prep.sh':'a22c0ec29fefb46e405d57eee35b46d6ca6a2d622cded34a9374b7c8abc97d29',
-'fetch-tree.sh':'be3948e416bc8ac2a8c7f019df7f58efbd91bd4afe3e76fc8654d49d7de76569',
-'declared-deps.sh':'95cb060536b774db0f599146d59b70547404beb48033550dfabeaa65113b8394',
-'repo-scan.sh':'bc1e11e0ec918ecdb54fb95836bb36d5d594800413c36e8cdc1d0d3141765c63',
+'measure-residual-bytes.sh':'cd7548209b28c6a08d2729c40db7f95db80bcba9dd6e2203c493d8b05427f76d',
+'measure-free-disk.sh':'0b8e67159ad0ddfd7a6baf6e1f65c218b113d1e5bea802eae758c1413fd24d6b',
+'observe-pr.sh':'283844210db6aeb03235b48356394ad1899e874fa937786637a4f89f1f1f9796',
+'base-merge.sh':'518bbd61b12468bba040fff57d98875ae0836286f9e0007582e8b86695c8b166',
+'pr-push.sh':'8bd9627b9369eb835bf68f5bcac411b177545c8ce46767369227c16c94667430',
+'reply-resolve.sh':'4803620ac88c7d8f5f47d276cec4eef020473e8b221fb088713e42d9e90cf14b',
+'state.sh':'13970e7940fd99ff60891e919be9a2e580e3afdef22883b28cc2f5c29d57f650',
+'merge-gate.sh':'23266a588b5b106f0e42c102c6459d2a325cd2e32e4cc49d6dc9216cc994b73c',
+'worktree-remove.sh':'359ca2da277c5739427c468d9eab5257ec170acdc99333b9ff13a6618e520c3f',
+'recover-prep.sh':'41ef6623142eebea103b68af1fdeb1fd18efbb7336044e18c39b92b984909f8f',
+'fetch-tree.sh':'f0916aa4a200aa403c041e3bb1f22c4353611eb8225c6c6f9e4bb3a0515441e8',
+'declared-deps.sh':'969a97b170dd12737a95c35d49f547e324dcb9bbd4b8f215194e48edf9077161',
+'repo-scan.sh':'212f47b8874e652e6462162f01ead69f27620931f6b0a3ba4072fad9df950bba',
 }
 
 
@@ -4592,6 +4600,7 @@ return r.map((k)=>a[k].replace(/。$/, '')).join('。')
 
 function o2(a,b){
 if(a===null||typeof a!=='object'||Array.isArray(a))return false
+
 return Object.keys(b).every((k)=>Zp(a,k)&&JSON.stringify(a[k])===JSON.stringify(b[k]))
 }
 

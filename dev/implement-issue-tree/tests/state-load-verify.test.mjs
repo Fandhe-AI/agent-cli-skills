@@ -20,6 +20,7 @@ import { trackTmp } from './lib/tmp-track.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { noNote } from './lib/state-project.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT_PATH = join(HERE, '..', 'scripts', 'implement-issue-tree.src.js')
@@ -89,11 +90,18 @@ const nodeSha = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
 const keysOf = (hashes) => sha256Hex(canonicalJson(Object.keys(hashes).sort()))
 
 // jq 1.8.1 で `jq -jcS --arg k "$k" '.items[$k]' sample/state-example.json | sha256sum` を実行した値。
-const SAMPLE_JQ_HASHES = {
+const SAMPLE_JQ_FULL_HASHES = {
   42: 'c343d27a932798c0bb87a2c0d22c7427423b8a824d004e9ebfc53cfaf92668ae',
   43: 'bdb65d91dd3b17fd64c574c0a0843f84b84d5237607f80b1652be74a1a538fdc',
   44: '3ade2ae5dbeedcc16c6cf2619797ee85b97e49c2e48dee69a6e4395818d6dcbb',
   45: '9aba53f4b220229b479b32bde109a0cd1e422c06b26db2e78c19eeb600dbdee9',
+}
+// 照合に使うハッシュ（state.sh verify と同じ射影: note を除く）。jq 1.7.1 で `jq -jcS --arg k "$k" '.items[$k] | del(.note)' sample/state-example.json | sha256sum` を実行した値（Issue #878）。
+const SAMPLE_JQ_HASHES = {
+  42: 'dc0354e7d48a1beb7e7065e2175e30bcc1be1b67a85c729b8cc129aced5dd0e7',
+  43: '18b58d2c4aeb80c6231a98a156c2c6b5ec4fb3f2268b5ed5d1c857a6e86612c5',
+  44: 'd5aef5527ffb0d1e93eb52d4ed87852010b717b90ea6d78df2d998d9b6e4be7d',
+  45: 'd8a73af005e5cfa10e6f141e197fcaba8a14d685ed5d0aafb2cedfaa08573bf9',
 }
 const sampleItems = JSON.parse(readFileSync(SAMPLE_STATE_PATH, 'utf8')).items
 
@@ -107,8 +115,8 @@ test('sha256Hex は node:crypto と一致する（ASCII・日本語・絵文字�
 })
 
 test('canonicalJson + sha256Hex は jq -jcS | sha256sum と一致する（sample/state-example.json の全項目）', () => {
-  assert.deepEqual(Object.keys(sampleItems).sort(), Object.keys(SAMPLE_JQ_HASHES).sort())
-  for (const [k, expected] of Object.entries(SAMPLE_JQ_HASHES)) {
+  assert.deepEqual(Object.keys(sampleItems).sort(), Object.keys(SAMPLE_JQ_FULL_HASHES).sort())
+  for (const [k, expected] of Object.entries(SAMPLE_JQ_FULL_HASHES)) {
     assert.equal(sha256Hex(canonicalJson(sampleItems[k])), expected, `item ${k}`)
   }
 })
@@ -381,7 +389,7 @@ test('loadState: 新規作成（items: {}）は検証成立で verified: true', 
 
 // Issue #535: state:load が先頭 5 件しか返さない場合、ホストが欠落キーを特定して 5 件ずつ再取得する。
 const makeItems = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [String(100 + i), { status: 'monitoring', pr: 1000 + i, branch: `fix/${100 + i}-x` }]))
-const hashesOf = (items) => Object.fromEntries(Object.entries(items).map(([k, v]) => [k, sha256Hex(canonicalJson(v))]))
+const hashesOf = (items) => Object.fromEntries(Object.entries(items).map(([k, v]) => [k, sha256Hex(canonicalJson(noNote(v)))]))
 const verifyResult = (hashes) => ({ fileExists: true, hashes, keysSha256: keysOf(hashes), keysCount: Object.keys(hashes).length, highWaterBytes: 0, highWaterVersion: 0 })
 // fill プロンプトの --argjson k '[...]' から要求キーを取り出し、実ファイル相当の items から返す。
 const requestedKeys = (prompt) => JSON.parse(/--argjson k '(\[[^']*\])'/.exec(prompt)[1])
