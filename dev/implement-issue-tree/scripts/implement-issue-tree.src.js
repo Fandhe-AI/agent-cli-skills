@@ -3025,7 +3025,7 @@ function isValidStateVerifyResult(r) {
 const STATE_FILL_SCHEMA = obj(['items'], { items: { type: 'object', additionalProperties: true } })
 const isValidStateFillResult = (r) => r?.items !== null && typeof r?.items === 'object' && !Array.isArray(r.items)
 
-// state:load-verify の返却（scripts/state.sh verify の封筒。Issue #603 計画 C の P5）。payload は固定欄と entries（[{k: 項目番号, h: そのハッシュ, n: note のハッシュ〔note が文字列でなければ空文字〕}]）だけで、自由形式の object を持たない。
+// state:load-verify の返却（scripts/state.sh verify の封筒。Issue #603 計画 C の P5）。payload は固定欄と entries（[{k: 項目番号, h: そのハッシュ, n: note のハッシュ〔note が文字列でなければ印の - 。空文字は出さない: 書き写しで落ちる〕}]）だけで、自由形式の object を持たない。
 const STATE_VERIFY_PAYLOAD_SCHEMA = obj(['entries', 'highWaterBytes', 'highWaterVersion', 'inputSha256', 'keysCount', 'keysSha256', 'mode', 'outcome', 'page', 'pages'], {
     entries: { type: 'array', items: obj(['h', 'k', 'n'], { h: SV_STR, k: SV_STR, n: SV_STR }) },
     highWaterBytes: SV_INT, highWaterVersion: SV_INT, inputSha256: SV_STR, keysCount: SV_INT, keysSha256: SV_STR, mode: SV_STR, outcome: SV_STR, page: SV_INT, pages: SV_INT,
@@ -3036,7 +3036,7 @@ const STATE_VERIFY_MAX_PAGES = 50
 function isValidStateVerifyEnvelope(r, nonce, page) {
   const s = verifySignedOutput(r, nonce, sha256Hex(`${STATE_FILE}\n${page}`))
   const p = s.payload
-  return s.ok && p.mode === 'verify' && p.page === page && ['ok', 'nofile', 'error'].includes(p.outcome) && Array.isArray(p.entries) && p.entries.every((e) => /^([0-9a-f]{64})?$/.test(e?.n)) && isInt(p.pages) && p.pages >= 1
+  return s.ok && p.mode === 'verify' && p.page === page && ['ok', 'nofile', 'error'].includes(p.outcome) && Array.isArray(p.entries) && p.entries.every((e) => /^([0-9a-f]{64}|-)$/.test(e?.n)) && isInt(p.pages) && p.pages >= 1
 }
 
 // 全ページの payload（検証済み）を従来の照合入力 { fileExists, hashes, keysSha256, keysCount, highWaterBytes, highWaterVersion } へ戻す純粋関数。nofile は「ファイルなし」、error（壊れた・読めない）・ページ間の食い違い（pages・keysSha256・keysCount・高水位・outcome）・不正なキーと重複キーは null（呼び出し側が停止する）。キーの欠落・追加は loadState の keysSha256 / keysCount の照合が止める
