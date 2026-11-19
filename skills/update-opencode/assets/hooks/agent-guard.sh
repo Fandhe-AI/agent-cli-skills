@@ -275,18 +275,24 @@ function env_split(v, hh) { esplit = 1; enqueue(v, hh); return split_has_h(v) }
 function secret_name(w) { return (toupper(w) ~ /TOKEN|SECRET|KEY|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION|BEARER|(^|_)PAT$/) }
 function secret_ref(v) { return (secret_var(v) || index(v, "{!") > 0) }
 # 秘密らしい変数の展開か。v は展開を空白でつないだ列（tokv・hsv・heredoc 本文の 1 件。var_at が返す、$NAME は NAME、${...} は { から } まで）。
-# 環境変数として届く秘密値（GH_TOKEN・GITHUB_TOKEN・OPENCODE_PASSWORD 等）は大文字の名前なので、大文字を 1 つも含まない名前
-# （secret_count・token_hits。秘密情報の検査が件数やパターンを入れる普通のシェル変数）は秘密変数とみなさない。大小混在（GitHub_Token）は
-# 大文字を含むので今までどおり止める。要素ごとに先頭の名前（$x・${x}・${#x}・${x:-…}・${x%…} の x）を取り出し、大文字を含まなければ
-# 名前の部分だけを除いて、残り（${x:-$GH_TOKEN} の既定値など）と名前を取り出せない要素は従来の正規表現で見る。${!x} は secret_ref が止める。
-# 受け入れた残余リスク（Issue #885・オーナー判断 2026-11-19）: 小文字の変数に秘密を入れた値の表示（gh_token=$(gh auth token); echo $gh_token）は
-# この関数では止まらない。$t のような名前は元から止まらず、取り出し元（gh auth token 等）は別の検査が止めるため。
-function secret_var(v,   n, a, i, s, nm, o) {
+# 秘密検査が使う普通のシェル変数（secret_count・token_hits）まで止めると正当な検査が動かないので、次の 2 つだけ名前の部分を除く。
+#  (a) 小文字だけの名前で、件数・パターン・結果を表す接尾辞（_count・_hits・_total・_rc・_pattern 等）か接頭辞（n_・num_・count_）を持つもの。
+#  (b) ${#x}（長さ）で x が小文字だけのもの。長さは値を明かさない。
+# それ以外の小文字の名前（gh_token・api_key・pat・secret）は今までどおり止める。理由は 2 つ。#854 で小文字の $pat を PAT と同じ扱いで止めると決めたこと、
+# 導入先から環境変数として小文字の名前で渡る秘密があり得る（codex の指摘）こと。_pat は PAT と区別できないので接尾辞に入れない。
+# 大小混在（GitHub_Token）は大文字を含むので除外しない。要素ごとに先頭の名前（$x・${x}・${#x}・${x:-…}・${x%…} の x）を取り出し、除外なら名前の部分だけを除く。
+# 残り（${x:-$GH_TOKEN} の既定値など）と名前を取り出せない要素は従来の正規表現で見る。${!x} は secret_ref が止める。
+# 受け入れた残余リスク（Issue #885）: (a) の名前に秘密を入れた値の表示（n_tokens=$(gh auth token); echo $n_tokens）は止まらない。
+# 件数・結果の名前に秘密を入れる使い方は通常なく、取り出し元（gh auth token 等）は別の検査が止める。
+function secret_var(v,   n, a, i, s, nm, o, ln) {
   n = split(v, a, "[ ]"); o = ""
   for (i = 1; i <= n; i++) {
     s = a[i]
-    if (match(s, /^[{]#?[A-Za-z_][A-Za-z0-9_]*/)) { nm = substr(s, 1, RLENGTH); sub(/^[{]#?/, "", nm); if (nm == tolower(nm)) s = "{" substr(s, RLENGTH + 1) }
-    else if (s ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && s == tolower(s)) s = ""
+    if (match(s, /^[{]#?[A-Za-z_][A-Za-z0-9_]*/)) {
+      ln = RLENGTH; nm = substr(s, 1, ln); sub(/^[{]#?/, "", nm)
+      if (nm == tolower(nm) && (substr(s, 2, 1) == "#" || nm ~ /_(counts?|cnt|hits?|n|num|total|found|matches|match|lines|len|rc|status|ok|files|patterns?|re|regex)$/ || nm ~ /^(n|num|count)_/)) s = "{" substr(s, ln + 1)
+    }
+    else if (s ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && s == tolower(s) && (s ~ /_(counts?|cnt|hits?|n|num|total|found|matches|match|lines|len|rc|status|ok|files|patterns?|re|regex)$/ || s ~ /^(n|num|count)_/)) s = ""
     o = o (i > 1 ? " " : "") s
   }
   return (toupper(o) ~ /TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|BEARER|COOKIE|(^|[^A-Z0-9])AUTH([^A-Z]|$)|(^|[^A-Z0-9])PAT([^A-Z0-9_]|$)/)

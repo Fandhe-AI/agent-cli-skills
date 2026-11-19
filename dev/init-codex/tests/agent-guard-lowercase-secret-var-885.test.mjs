@@ -1,7 +1,7 @@
-// agent-guard.sh の secret_var が、大文字を 1 つも含まない変数名を秘密変数とみなさない変更（Issue #885）の回帰テスト。
-// 環境変数として届く秘密値（GH_TOKEN・GITHUB_TOKEN 等）は大文字の名前なので、secret_count・token_hits のような
-// 小文字だけの普通のシェル変数は通す。大小混在・大文字だけの名前、既定値の中の参照、間接参照、heredoc 本文は止めたままにする。
-// 受け入れた残余リスク: 小文字の変数に秘密を入れた値の表示（$gh_token）は止まらない（取り出し元は別の検査が止める）。
+// agent-guard.sh の secret_var の除外を、件数・パターン・結果の接尾辞（_count・_hits 等）か接頭辞（n_・num_・count_）を持つ
+// 小文字だけの名前と、小文字だけの名前の長さ ${#x} に絞った変更（Issue #885）の回帰テスト。
+// 小文字の gh_token・api_key・pat・secret は止めたまま（#854 の $pat の決定と、環境変数として小文字で渡る秘密）。
+// 大小混在・大文字だけの名前、既定値の中の参照、間接参照、heredoc 本文も止めたままにする。
 // subagent=true / null は認証情報の読み出しを止める側、false は止めない側。/bin/bash（3.2）と PATH の bash で同じ結果になることを確かめる。
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
@@ -28,7 +28,7 @@ function run(bash, command, subagent) {
   })
 }
 
-// 小文字だけの変数名。subagent の全値で通る。
+// 件数・パターン・結果の名前と小文字の長さ。subagent の全値で通る。
 const ALLOW = [
   'echo "$secret_count"',
   "printf '%s' \"${token_hits}\"",
@@ -36,9 +36,13 @@ const ALLOW = [
   'echo "${secret_count}"',
   'echo ${token_hits%x}',
   'echo ${token_hits:-0}',
+  'echo "$n_tokens"',
+  'echo $secret_rc $token_total',
+  'grep -cE "$secret_pattern" f',
+  'echo ${#gh_token} ${#pat}',
 ]
 
-// 大小混在・大文字だけ・既定値の中の参照・間接参照・heredoc 本文。subagent=true / null で止める。
+// 小文字の秘密名・大小混在・大文字だけ・既定値の中の参照・間接参照・heredoc 本文。subagent=true / null で止める。
 const DENY = [
   'echo $GH_TOKEN',
   'echo "${GITHUB_TOKEN}"',
@@ -53,9 +57,17 @@ const DENY = [
   'cat <<EOF\n$GITHUB_TOKEN\nEOF',
   'cat <<EOF\n${GITHUB_TOKEN}\nEOF',
   'cat <<< "$GH_TOKEN"',
+  'echo "$gh_token"',
+  'curl -d "$api_key" x',
+  'echo $pat',
+  'echo $secret',
+  'echo ${gh_token}',
+  "pat='(foo)'; n=$(grep -cE \"$pat\" f); echo \"$n\"",
+  'echo $secret_pat',
+  'echo ${secret_count:-$gh_token}',
 ]
 
-describe('secret_var: 小文字だけの変数名 (#885)', () => {
+describe('secret_var: 除外は件数・パターンの名前と長さだけ (#885)', () => {
   for (const bash of BASHES) {
     for (const sub of [true, null, false]) {
       for (const c of ALLOW) {
