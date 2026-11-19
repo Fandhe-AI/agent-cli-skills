@@ -274,7 +274,23 @@ function env_split(v, hh) { esplit = 1; enqueue(v, hh); return split_has_h(v) }
 # 引用符つき heredoc の本文、検索パターンはコマンドとして読まない。結果は cred_hit 等のグローバルへ積み、END で集約する。
 function secret_name(w) { return (toupper(w) ~ /TOKEN|SECRET|KEY|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION|BEARER|(^|_)PAT$/) }
 function secret_ref(v) { return (secret_var(v) || index(v, "{!") > 0) }
-function secret_var(v) { return (toupper(v) ~ /TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|BEARER|COOKIE|(^|[^A-Z0-9])AUTH([^A-Z]|$)|(^|[^A-Z0-9])PAT([^A-Z0-9_]|$)/) }
+# 秘密らしい変数の展開か。v は展開を空白でつないだ列（tokv・hsv・heredoc 本文の 1 件。var_at が返す、$NAME は NAME、${...} は { から } まで）。
+# 環境変数として届く秘密値（GH_TOKEN・GITHUB_TOKEN・OPENCODE_PASSWORD 等）は大文字の名前なので、大文字を 1 つも含まない名前
+# （secret_count・token_hits。秘密情報の検査が件数やパターンを入れる普通のシェル変数）は秘密変数とみなさない。大小混在（GitHub_Token）は
+# 大文字を含むので今までどおり止める。要素ごとに先頭の名前（$x・${x}・${#x}・${x:-…}・${x%…} の x）を取り出し、大文字を含まなければ
+# 名前の部分だけを除いて、残り（${x:-$GH_TOKEN} の既定値など）と名前を取り出せない要素は従来の正規表現で見る。${!x} は secret_ref が止める。
+# 受け入れた残余リスク（Issue #885・オーナー判断 2026-11-19）: 小文字の変数に秘密を入れた値の表示（gh_token=$(gh auth token); echo $gh_token）は
+# この関数では止まらない。$t のような名前は元から止まらず、取り出し元（gh auth token 等）は別の検査が止めるため。
+function secret_var(v,   n, a, i, s, nm, o) {
+  n = split(v, a, "[ ]"); o = ""
+  for (i = 1; i <= n; i++) {
+    s = a[i]
+    if (match(s, /^[{]#?[A-Za-z_][A-Za-z0-9_]*/)) { nm = substr(s, 1, RLENGTH); sub(/^[{]#?/, "", nm); if (nm == tolower(nm)) s = "{" substr(s, RLENGTH + 1) }
+    else if (s ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && s == tolower(s)) s = ""
+    o = o (i > 1 ? " " : "") s
+  }
+  return (toupper(o) ~ /TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|BEARER|COOKIE|(^|[^A-Z0-9])AUTH([^A-Z]|$)|(^|[^A-Z0-9])PAT([^A-Z0-9_]|$)/)
+}
 # パスの正規化。macOS の FS は大文字小文字を区別しないので小文字へ寄せ、// と /./ と /x/../ を畳む。
 function normpath(s,   n) {
   s = tolower(s)
