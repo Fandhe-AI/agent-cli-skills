@@ -298,7 +298,8 @@ exit 1
 
 const ROOT_ARGS = ['--root', '100', '--granularity', '2h', '--phase', '1', '--phase-number', '101']
 
-function runRootFull(rootBody, children, { args = ROOT_ARGS, env = {} } = {}) {
+// fixtures は子の既定 '[]' の後に書く（closed の子の下に孫を置くテスト用。既存の呼び出しは渡さない）
+function runRootFull(rootBody, children, { args = ROOT_ARGS, env = {}, fixtures = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'step6root-'))
   const bin = join(dir, 'bin')
   const fx = join(dir, 'fx')
@@ -311,6 +312,7 @@ function runRootFull(rootBody, children, { args = ROOT_ARGS, env = {} } = {}) {
   const pn = pnIdx >= 0 ? args[pnIdx + 1] : '101'
   writeFileSync(join(fx, `sub_${pn}_1.json`), JSON.stringify(children))
   for (const c of children) writeFileSync(join(fx, `sub_${c.number}_1.json`), '[]')
+  for (const [name, data] of Object.entries(fixtures)) writeFileSync(join(fx, name), JSON.stringify(data))
   const callLog = join(dir, 'calls.log')
   const allLog = join(dir, 'all.log')
   const bodyOut = join(dir, 'body.md')
@@ -1597,4 +1599,61 @@ test('(I5) 深さ 0 の表行で余った </details> は深さを負にせず、
   const { r, body } = runRootFull(root, [issue(111, 'feat: 新しい子')])
   assert.equal(r.status, 0, r.stderr)
   assert.ok(body.includes('| #9 | keep |') && body.includes('<details><summary>退避</summary>'))
+})
+
+// ---- 総 open 件数は Phase 親の全子孫の open で数える・jq の失敗で止める ----
+// 1 段目だけ open の子に絞っていたため、closed の子の下に残った open issue が総数から漏れていた。
+// count_open_desc は closed の下も数えるので、1 段目とそれより下で数え方が食い違っていた
+test('(J1) create: closed の直下の子の下に残った open issue も総数に入り、closed の子は詳細表に出ない', () => {
+  const fx = BASE()
+  fx['sub_101_1.json'] = [issue(111, 'feat: DB 設計'), issue(112, 'feat: API 雛形'), issue(113, 'feat: 完了済み', 'closed')]
+  fx['sub_113_1.json'] = [issue(1131, 'feat: 残置')]
+  fx['sub_1131_1.json'] = []
+  const ctx = setup(fx)
+  try {
+    const { r, calls, body } = run(ctx)
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(calls.length, 1)
+    assert.match(body, /\| Phase 1 \| #101 feat: 基盤整備 \| 2 \| 4 \|/)
+    assert.match(body, /\| Phase 2 \| #102 feat: 機能追加 \| 1 \| 1 \|/)
+    assert.ok(!/^\| #113 /m.test(body), 'closed の子が詳細表に出ている')
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('(J2) create: sub_issues 応答の形が想定外で jq 変換が失敗したら edit せず非ゼロ終了する', () => {
+  // JSON でない応答は list_subs の jq -s で既に止まる。配列要素が文字列だと list_subs は通り、
+  // `.state` の参照で jq が失敗する。空値のまま件数欄が空の Phase 行を書いてはならない
+  const fx = BASE()
+  fx['sub_101_1.json'] = ['unexpected']
+  const ctx = setup(fx)
+  try {
+    const { r, calls, body } = run(ctx)
+    assert.notEqual(r.status, 0)
+    assert.equal(calls.length, 0, 'gh issue edit が呼ばれた')
+    assert.equal(body, null)
+    assert.match(r.stderr, /絞り込みに失敗/)
+  } finally {
+    rmSync(ctx.dir, { recursive: true, force: true })
+  }
+})
+
+test('(J3) merge: closed の直下の子の下に残った open issue も総数に入り、closed の子は詳細表に出ない', () => {
+  const kids = [issue(111, 'feat: 新しい子'), issue(113, 'feat: 完了済み', 'closed')]
+  const fixtures = { 'sub_113_1.json': [issue(1131, 'feat: 残置')], 'sub_1131_1.json': [] }
+  const { r, body, edits } = runRootFull(ROOT_BODY, kids, { fixtures })
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(edits.length, 1)
+  assert.match(body, /^\| Phase 1 \| #101 feat: 基盤整備 \| 1 \| 2 \|$/m)
+  assert.ok(!/^\| #113 /m.test(body), 'closed の子が詳細表に出ている')
+})
+
+test('(J4) merge: closed の子の子孫取得に失敗したら edit せず非ゼロ終了する', () => {
+  const kids = [issue(111, 'feat: 新しい子'), issue(113, 'feat: 完了済み', 'closed')]
+  // sub_1131_1.json を置かないので、#1131 の取得で偽 gh が exit 1 を返す
+  const fixtures = { 'sub_113_1.json': [issue(1131, 'feat: 残置')] }
+  const { r, edits } = runRootFull(ROOT_BODY, kids, { fixtures })
+  assert.notEqual(r.status, 0)
+  assert.equal(edits.length, 0)
 })
