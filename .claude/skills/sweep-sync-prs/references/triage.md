@@ -65,7 +65,7 @@ resolve・`--auto` の武装・手動マージは、いずれも `SKILL.md` Step
   - 例: RUSTSEC の新しい advisory は、依存の更新か、根拠付きの ignore(`deny.toml` と `.cargo/audit.toml` の両方)。
   - main を直したら、同期 PR は `gh pr update-branch` で CI を通し直す。
 - **main の潜在赤**: 同期 PR だけが赤で、落ちた検査が同期 PR の差分と無関係（依存監査・clippy・examples など）なら、main 側の潜在赤を疑う。
-  - 原因の例: 依存監査は lockfile・manifest・deny.toml を変えた PR だけで走る。main は緑のまま、新しい RustSec 勧告で赤になっていることがある。toolchain の更新（Rust 1.100）で新しい clippy の lint が error になり、main への push で初めて表に出た例や、build-dir の構成変更で CI の後片づけスクリプトが壊れた例もある。
+  - 原因の例: 依存監査は lockfile・manifest・deny.toml を変えた PR だけで走る。main は緑のまま、新しい RustSec 勧告で赤になっていることがある。toolchain の更新（Rust の新版）で新しい clippy の lint が error になり、main への push で初めて表に出た例や、build-dir の構成変更で CI の後片づけスクリプトが壊れた例もある。
   - 対処: 同期 PR ではなく main を直す PR を出し、マージしてから `gh pr update-branch` で同期 PR を追いつかせる。
   - 勧告の ignore は、対象リポの規約に従い、所有者の承認と出典が要る。承認が無ければ「オーナー判断待ち」として報告する。
   - 同じ原因の潜在赤は、ほかの Rust リポにもあり得る。ほかのリポの main の CI も確かめる横断確認を、オーナーへ提案する。
@@ -94,7 +94,7 @@ resolve・`--auto` の武装・手動マージは、いずれも `SKILL.md` Step
 ## PR の相互依存(循環)
 
 - 見分け方: 2 本の PR が、互いに相手が main に入らないと通らない。
-  - 事例: fandhe-ai の #4326 は main の勧告で依存監査が赤だった。その修正 #4329 は、#4326 の勧告受容が main に無いと通らなかった。
+  - 事例: 勧告を受容する PR A が依存監査で赤く、依存を更新する PR B は A の受容が main に無いと通らない。
 - 対象: 2 本とも、同期 workflow が更新しない修正用のブランチ(main を直す PR)である場合だけ。
   - 同期 PR(`chore/skills-update-*`)は、統合先にも取り込み元にもしない。同期 PR の変更は再同期の force-push で消え、統合後の待機中に同期が走ると修正が失われるため。
   - 片方が同期 PR なら統合しない。修正 PR を先に main へ入れ、その後に同期 PR を `gh pr update-branch` で追いつかせる。
