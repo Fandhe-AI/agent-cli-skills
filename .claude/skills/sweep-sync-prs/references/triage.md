@@ -64,6 +64,12 @@ resolve・`--auto` の武装・手動マージは、いずれも `SKILL.md` Step
 - まず main の CI(schedule / push)も同じ理由で落ちているかを確かめる。落ちているなら修正先は main。
   - 例: RUSTSEC の新しい advisory は、依存の更新か、根拠付きの ignore(`deny.toml` と `.cargo/audit.toml` の両方)。
   - main を直したら、同期 PR は `gh pr update-branch` で CI を通し直す。
+- **main の潜在赤**: 同期 PR だけが赤で、落ちた検査が同期 PR の差分と無関係（依存監査・clippy・examples など）なら、main 側の潜在赤を疑う。
+  - 原因の例: 依存監査は lockfile・manifest・deny.toml を変えた PR だけで走る。main は緑のまま、新しい RustSec 勧告で赤になっていることがある。toolchain の更新（Rust 1.100）で新しい clippy の lint が error になり、main への push で初めて表に出た例や、build-dir の構成変更で CI の後片づけスクリプトが壊れた例もある。
+  - 対処: 同期 PR ではなく main を直す PR を出し、マージしてから `gh pr update-branch` で同期 PR を追いつかせる。
+  - 勧告の ignore は、対象リポの規約に従い、所有者の承認と出典が要る。承認が無ければ「オーナー判断待ち」として報告する。
+  - 同じ原因の潜在赤は、ほかの Rust リポにもあり得る。ほかのリポの main の CI も確かめる横断確認を、オーナーへ提案する。
+  - → 判断基準: 同期 PR の差分と無関係な検査が落ちたら、PR 側を直さず、まず main の同じ検査を確かめる。
 - flaky の既知類型は `gh run rerun --failed` を 1 回だけ行う。
   - advisory-db 401
   - OOM signal 9
@@ -84,6 +90,16 @@ resolve・`--auto` の武装・手動マージは、いずれも `SKILL.md` Step
   gh api -X PATCH "repos/Fandhe-AI/$r/git/refs/heads/${branch}" -f sha="$new" -F force=false
   ```
   `sha` は main が取得した現在の HEAD sha、`branch` は PR の head ブランチ。
+
+## PR の相互依存(循環)
+
+- 見分け方: 2 本の PR が、互いに相手が main に入らないと通らない。
+  - 事例: fandhe-ai の #4326 は main の勧告で依存監査が赤だった。その修正 #4329 は、#4326 の勧告受容が main に無いと通らなかった。
+- 対処: 片方のブランチをもう一方へ取り込み、1 本の PR で通す。
+  1. 通常のマージコミット（`git merge --no-ff`）で取り込む。メッセージは `-F` で渡す。force push はしない（`SKILL.md` 注意事項）。
+  2. 残す側の PR の本文とタイトルに、両方の変更と経緯を追記する。
+  3. 取り込み元の PR は、残す側のマージ後に「取り込み済み」と理由を書いて閉じる。コメントと close は、`SKILL.md` Step 4 の承認一覧に載せる。
+- → 判断基準: 相手待ちで両方が止まったら、片方を待たず 1 本にまとめる。
 
 ## Bugbot 対象外(TOO_LARGE_TO_REVIEW)
 
