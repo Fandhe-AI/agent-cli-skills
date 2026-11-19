@@ -192,7 +192,7 @@ subagent=$(printf '%s' "$input" | jq -r '.subagent | tostring') || finish deny b
 #   - HUSKY=0 は同じコマンド文字列内の代入だけを見る（別の呼び出しで export 済みのものは見えない）
 #   - 認証情報の読み出し（credential-read）の残存ギャップ: 値を取るラッパー（`timeout 10 gh auth token`・`xargs` への分割など。
 #     コマンド位置を読み違える点は gh pr merge のマージ系判定と同じ限界）、glob（`cat ~/.config/g*/h*.yml`）、
-#     curl で API を直接叩く・`node -e`・`python -c` 等のスクリプト言語、変数経由（`f=hosts.yml; cat $f`）・eval で組み立てる形、
+#     curl で API を直接叩く・`node -e`・`python -c` 等のスクリプト言語、変数経由（`f=hosts.yml; cat $f`・`t=$GH_TOKEN; echo "$t"`。除外した名前〔secret_count 等〕への秘密値の代入だけは止める）・eval で組み立てる形、
 #     検索コマンドの option の値の読み違い（`rg -g hosts.yml pat` は値として通す）、`grep -r token ~/.config` 以外のディレクトリ指定（~ / ~/.config / ~/.codex そのものは止める）・`find ~ -exec cat {} +`、
 #     `jq -n env` / `jq -n '$ENV'`（jq 自身の環境参照）、~/.aws/credentials・~/.npmrc・~/.ssh/id_* を開く形（対象は gh と codex と
 #     git の認証だけ）、トークンを URL に埋めたリモートを `git remote -v` で表示する形、`xargs env` / `find -exec env`
@@ -284,15 +284,19 @@ function secret_ref(v) { return (secret_var(v) || index(v, "{!") > 0) }
 # 残り（${x:-$GH_TOKEN} の既定値など）と名前を取り出せない要素は従来の正規表現で見る。${!x} は secret_ref が止める。
 # 受け入れた残余リスク（Issue #885）: (a) の名前に秘密を入れた値の表示（n_tokens=$(gh auth token); echo $n_tokens）は止まらない。
 # 件数・結果の名前に秘密を入れる使い方は通常なく、取り出し元（gh auth token 等）は別の検査が止める。
+# 除外する名前（小文字だけで、件数・結果の接尾辞か接頭辞を持つ）。secret_var と cred_check の代入語の判定が同じ条件を使う。
+function exempt_name(nm) {
+  return (nm == tolower(nm) && (nm ~ /_(counts?|cnt|hits?|n|num|total|found|matches|match|lines|len|rc|status|ok|files|patterns?|re|regex)$/ || nm ~ /^(n|num|count)_/))
+}
 function secret_var(v,   n, a, i, s, nm, o, ln) {
   n = split(v, a, "[ ]"); o = ""
   for (i = 1; i <= n; i++) {
     s = a[i]
     if (match(s, /^[{]#?[A-Za-z_][A-Za-z0-9_]*/)) {
       ln = RLENGTH; nm = substr(s, 1, ln); sub(/^[{]#?/, "", nm)
-      if (nm == tolower(nm) && (substr(s, 2, 1) == "#" || nm ~ /_(counts?|cnt|hits?|n|num|total|found|matches|match|lines|len|rc|status|ok|files|patterns?|re|regex)$/ || nm ~ /^(n|num|count)_/)) s = "{" substr(s, ln + 1)
+      if (nm == tolower(nm) && (substr(s, 2, 1) == "#" || exempt_name(nm))) s = "{" substr(s, ln + 1)
     }
-    else if (s ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && s == tolower(s) && (s ~ /_(counts?|cnt|hits?|n|num|total|found|matches|match|lines|len|rc|status|ok|files|patterns?|re|regex)$/ || s ~ /^(n|num|count)_/)) s = ""
+    else if (s ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && exempt_name(s)) s = ""
     o = o (i > 1 ? " " : "") s
   }
   return (toupper(o) ~ /TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|BEARER|COOKIE|(^|[^A-Z0-9])AUTH([^A-Z]|$)|(^|[^A-Z0-9])PAT([^A-Z0-9_]|$)/)
@@ -383,12 +387,15 @@ function conf_ok(c,   n, a, b, s) {
   if (n == 3 && (a == "--get" || a == "get")) return (conf_key(b) && tolower(b) !~ /extraheader/)
   return (n == 3 && conf_key(a))
 }
+# 代入語（name=value）の代入先が除外した名前なら 1。除外した名前は表示されても通すので、そこへ秘密値を入れる代入（secret_count=$GH_TOKEN）は
+# 代入語の除外に頼らず止める。それ以外の名前（t=$GH_TOKEN・GH_TOKEN=$X）の代入は従来どおり除く。
+function exempt_asg(w,   nm) { nm = w; sub(/=.*/, "", nm); return exempt_name(nm) }
 function cred_check(p, wr,   cb, i, k, t, np, fl, pos, j, sk, haspat, noidx, grepv, vs) {
   for (i = 1; i <= nrin; i++) cred_tok(rin[i])
   # 秘密らしい変数の展開（二重引用符内・引用符なし。${!x} の間接展開を含む）は、どのコマンドの引数でも標準出力・通信・ログへ流れ得る
   # （gh pr comment --body "$GH_TOKEN"・git commit -m "$GH_TOKEN"・curl -d "$GITHUB_TOKEN"・`command -V "$GH_TOKEN"` は
   # `command: <値>: not found` で値を出す）。代入の語（X=$GH_TOKEN）は値を表示しないので除く。下のどの早期 return よりも先に見る。
-  for (k = 1; k <= ntok; k++) if (tokv[k] != "" && secret_ref(tokv[k]) && !(k < p && tok[k] ~ /^[A-Za-z_][A-Za-z0-9_]*=/)) cred_hit = 1
+  for (k = 1; k <= ntok; k++) if (tokv[k] != "" && secret_ref(tokv[k]) && !(k < p && tok[k] ~ /^[A-Za-z_][A-Za-z0-9_]*=/ && !exempt_asg(tok[k]))) cred_hit = 1
   # command -v / -V は名前の検索だけで実行しない（`command -v printenv`・`command -v set`・`command -v export`）。
   if (cmdv) return
   if (exi > 0) {
