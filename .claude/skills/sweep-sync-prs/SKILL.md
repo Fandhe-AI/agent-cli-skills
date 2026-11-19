@@ -143,7 +143,7 @@ PR ごとに下表の入口で類型を決め、対処の詳細は `references/t
 | Bugbot / codex の未解決スレッドが残る | 未解決スレッド |
 | 同じ箇所への指摘が 3 巡続く | 連鎖指摘 |
 | チェックが failure | CI 失敗（同期 PR の差分と無関係な検査だけ赤なら main の潜在赤を疑う） |
-| 2 本の PR が互いに相手の merge を待って通らない | PR の相互依存 |
+| 修正用の 2 本の PR が互いに相手の merge を待って通らない(同期 PR は統合しない) | PR の相互依存 |
 | base が古い / required check が「expected」のまま固まる | 古い base・固着 |
 | Bugbot が `TOO_LARGE_TO_REVIEW`（差分 4 万行超） | Bugbot 対象外 |
 | 条件は満たすのに resolve 後も auto-merge が発火しない | 発火漏れ |
